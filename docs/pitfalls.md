@@ -131,3 +131,26 @@ for eight minutes and has no timeout. Download the whole IPSW with `curl -C -` a
 `--ipsw <local file>`; the extraction step then runs locally. The kernel materials alone
 only need ~16 MB of range reads, so the whole file is only worth it for the two system
 volumes.
+
+**The documented `./unixnu payload` route does not produce a payload here.** Chasing
+`[payload] tools = true` (https://unixnu.com/zh/porting/log-capture) stops twice:
+
+```
+$ ./unixnu payload --device ../UniXNU-g0245d --uefi ../uefi-g0245d
+unixnu: kernel not found: .../kernel/kernel.macho; run "unixnu build kernel" or pass --kernel FILE
+$ ... --kernel out/ipsw/21H461/kernelcache.decompressed --unique-chip-id 0123456789ABCDEF
+unixnu: arm-io needs a non-zero base: an exported register lies below 16 MiB
+```
+
+The second is structural, not a porting bug: `scripts/unixnu/devicetree.py:192`
+(`arm_io_window`) rounds the lowest exported register down to a 16 MiB boundary and
+rejects `base == 0`, and MSM8996 keeps a large part of its peripheral space below
+16 MiB (UFS at `0x624000`, BLSP1 at `0x75xxxx`, MDSS at `0x900000`). Every SoC the
+upstream guide targets keeps peripherals above `0x1000000`.
+
+It is also unnecessary. `UniXNULib/Config.c`'s `mBuiltinConfig` already lists the
+Tools entry (`timeout = 10 / Return to firmware / Restart / Power off / Tools`), so
+the menu shows Tools with no payload volume at all; the volume only replaces that
+built-in menu. What was missing is the plugin behind Tools, and that is
+`UniXNUPkg/Driver/AdvancedLogDxe` — it needs the Advanced Logger buffer, not a
+payload. v101 wires the buffer (see uefi-g0245d `docs/advanced-logger.md`).

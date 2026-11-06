@@ -344,7 +344,7 @@ findings = [
 ]
 completion = ["Each claimed milestone has a reproducible command, a matching source/image revision and an accessible result."]
 limits = ["Device availability not established; serial line wiring from the service manual.", "QR log export stays blocked until the platform gains an Advanced Logger and the menu accepts input; a candidate path is to make the exporter start without a menu action, which the current AdvancedLogDxe does not do."]
-next_action = ["Confirm the timer fix from the menu, then re-evaluate the Advanced Logger exporter: wire AdvancedLoggerDxe plus PcdUniXNUDeviceModel first, since without a platform log buffer the exporter has nothing to read."]
+next_action = ["Flash v101 and open Tools -> Advanced Logger. The logger is wired but nothing on the device has confirmed it yet: an empty Tools menu means AdvancedLogDxe never dispatched (its depex is gAdvancedLoggerProtocolGuid, installed only by DxeCore's AdvancedLoggerLib constructor), and a QR page that will not scan means the log buffer is empty or unmapped. Record the first real log capture in this area before removing KeyProbeDxe."]
 evidence = [
   "board.dts serial@075b0000 (status ok) and serial@07570000 (disabled).",
   "Common/Mu/AdvLoggerPkg and Common/Mu/MsGraphicsPkg/Library/QrEncoderLib present in the Mu-Silicium tree; UniXNUPkg/Driver/AdvancedLogDxe/AdvancedLogDxe.inf declares a gAdvancedLoggerProtocolGuid depex and produces the Tools menu plugin.",
