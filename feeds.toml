@@ -1,7 +1,7 @@
 [[source]]
 name = "msm8996"
 kind = "soc"
-git = "https://github.com/UniXNU/UniXNU-msm8996-common"
-# Pin a reviewed 40-character commit before the first build. Until then the
-# resolver falls back to the local checkout (see local.toml / --local-module).
-commit = "REQUIRED_SOC_COMMIT"
+git = "https://github.com/midopix/UniXNU-msm8996-common"
+# Pinned to the first published SoC commit. Re-pin whenever the SoC repository
+# changes; the resolver falls back to local.toml during development.
+commit = "8dcce79a0fa907d5ac59819e469210e3cba23998"
