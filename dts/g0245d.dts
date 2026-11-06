@@ -1,0 +1,157 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// UniXNU board description for the Gree G0245D (格力手机·色界).
+// Shared MSM8996 resources come from msm8996.dtsi.
+//
+// Board facts (confirmed from the stock QFIL package board.dtb,
+// see porting.toml "evidence" entries):
+//   SoC      Qualcomm Snapdragon 820 (MSM8996 v3.0), 4x Kryo
+//   RAM      4 GB LPDDR4, DRAM base 0x80000000
+//   Storage  64 GB UFS 2.0, 4096 B LBA, multi-LUN
+//   Display  FocalTech ft8716 1080x1920 DSI video panel, 60 fps,
+//            24 bpp, 4 lanes (init sequence in dts/panel-ft8716.txt)
+//   Touch    Synaptics DSX @ I2C 0x20 on BLSP2 I2C (0x75ba000),
+//            irq GPIO 125, reset GPIO 89
+//   Wi-Fi/BT QCA6174 (CNSS PCIe + bt_qca6174, BTFM.bin)
+//   UART     BLSP2 UART2 @ 0x75b0000, SPI 114, console=ttyHSL0,115200
+//   Splash   cont_splash_mem @ 0x83401000, size 0x23ff000 (36 MB)
+//
+// Handoff memory map at BootShim entry (all firmware-owned regions stay
+// reserved for UniXNU; see porting.toml "memory" area for evidence):
+//   0x6208000-0x66b4400  XBL/TZ core, low DDR (below DRAM base, not in /memory)
+//   0x80008000-0x81c03570  kernel image load window (BootShim+FD land here)
+//   0x83401000-0x85800000  cont_splash_mem (panel framebuffer handoff)
+//   0x85800000-0x88800000  removed_regions (TZ high 0x85e00000-0x85ec9a08,
+//                           SMEM 0x86000000-0x86200000)
+//   0x88800000-0x8ea00000  modem_region (NON-HLOS.bin, TZ-loaded)
+//   0x8ea00000-0x91500000  peripheral_region (TZ + aboot scratch,
+//                           boot header read scratch @ 0x8F6FF000)
+//   0x91600000-0x916c4478  aboot (emmc_appsboot.mbn image, running)
+//   0xb1c00000-0xb3fff000  cont_splash_mem_hdmi (stock reservation)
+//   0x92000000-0x92300000  UniXNU UEFI FV (FD_BASE=0x92000000, FD_SIZE=0x300000)
+//   0x178c00000-0x180000000  dynamic DMA pools (adsp 4M + qseecom 20M +
+//                           secure 92M), carved from the top of 4 GB in stock
+//
+// Replace every remaining TBD value from the firmware analysis
+// (see scripts/ and REA-WORKFLOW.md).
+/dts-v1/;
+/include/ "msm8996.dtsi"
+
+/ {
+    model = "Gree G0245D";
+    compatible = "gree,g0245d", "qcom,msm8996";
+
+    // SoC/board identification, verbatim from the stock board.dtb root.
+    // aboot scans the appended DTB table and selects the entry whose
+    // qcom,msm-id / qcom,board-id / qcom,pmic-id match the device
+    // (platform_id 0xf6 = 246 = MSM8996). These three properties must stay
+    // or the bootloader refuses the tree ("dtb not found" path).
+    qcom,msm-id = <0xf6 0x30000>;
+    qcom,board-id = <0x03 0x00>;
+    qcom,pmic-id = <0x20009 0x2000a 0x00 0x00>;
+
+    // 4 GB LPDDR4 at the MSM8996 standard DRAM base (size 0x100000000
+    // encoded as 64-bit cells: high = 1, low = 0).
+    memory@80000000 {
+        device_type = "memory";
+        reg = <0 0x80000000 1 0>;
+    };
+
+    reserved-memory {
+        #address-cells = <2>;
+        #size-cells = <2>;
+        ranges;
+
+        // Continuous splash framebuffer, verbatim from the stock DTS:
+        //   cont_splash_mem@83401000, reg = <0x00 0x83401000 0x00 0x23ff000>
+        // The stock ABL hands the panel framebuffer over at this address;
+        // the UniXNU GopFramebuffer stage adopts it unchanged.
+        splash_region: framebuffer@83401000 {
+            label = "cont_splash_region";
+            reg = <0 0x83401000 0 0x23ff000>;
+            no-map;
+        };
+
+        // removed_regions@85800000, size 0x3000000 (stock "removed-dma-pool").
+        // Contains the resident XBL/TZ high-DDR image (0x85e00000-0x85ec9a08,
+        // xbl.elf LOAD segments [5][10][11][12]) and the SMEM region
+        // (qcom,smem@86000000, 0x200000). Firmware-owned; keep no-map.
+        removed_regions: removed@85800000 {
+            compatible = "removed-dma-pool";
+            no-map;
+            reg = <0 0x85800000 0 0x3000000>;
+        };
+
+        // modem_region@88800000, size 0x6200000 (stock "removed-dma-pool").
+        // The modem subsystem image (NON-HLOS.bin) is loaded here by TZ
+        // before the HLOS boots and stays resident.
+        modem_region: modem@88800000 {
+            compatible = "removed-dma-pool";
+            no-map;
+            reg = <0 0x88800000 0 0x6200000>;
+        };
+
+        // peripheral_region@8ea00000, size 0x2b00000 (stock "removed-dma-pool").
+        // TZ runtime pool + aboot scratch. EMMC_BOOT_IMG_HEADER_ADDR
+        // (0x8F6FF000) lives inside this region: aboot reads the boot.img
+        // header here before loading the kernel.
+        peripheral_region: peripheral@8ea00000 {
+            compatible = "removed-dma-pool";
+            no-map;
+            reg = <0 0x8ea00000 0 0x2b00000>;
+        };
+
+        // aboot resident image (emmc_appsboot.mbn main segment):
+        // file offset 0x8000 maps to 0x91600000, entry 0x91600000,
+        // file size 0xb907c -> occupies 0x91600000-0x916b907c.
+        // aboot is still running when BootShim starts; keep reserved.
+        abl_region: abl@91600000 {
+            compatible = "removed-dma-pool";
+            no-map;
+            reg = <0 0x91600000 0 0xc0000>;
+        };
+
+        // cont_splash_mem_hdmi@b1c00000, size 0x23ff000 (stock reservation).
+        // Unfilled without an HDMI sink; kept no-map to mirror stock. Can be
+        // released if the MDP5 HDMI path is confirmed absent.
+        splash_hdmi_region: splash_hdmi@b1c00000 {
+            label = "cont_splash_mem_hdmi";
+            reg = <0 0xb1c00000 0 0x23ff000>;
+            no-map;
+        };
+
+        // Dynamic DMA pools from the stock DTS (shared-dma-pool, reusable):
+        //   adsp_region   size 0x400000  (4 MB)
+        //   qseecom_region size 0x1400000 (20 MB)
+        //   secure_region  size 0x5c00000 (92 MB)
+        // The stock kernel carves them from the top of the 4 GB window.
+        // UniXNU pins the same 116 MB window so the layout matches stock.
+        dyn_pools_region: dynpools@178c00000 {
+            compatible = "shared-dma-pool";
+            reusable;
+            reg = <1 0x78c00000 0 0x7400000>;
+            no-map;
+        };
+
+        // UniXNU UEFI firmware volume destination. BootShim relocates the FD
+        // here before entering UEFI. Placed in the free window above aboot
+        // (0x916c4478) and below the HDMI splash (0xb1c00000).
+        unixnu_fd_region: unixnu_fd@92000000 {
+            label = "unixnu_fd";
+            reg = <0 0x92000000 0 0x300000>;
+            no-map;
+        };
+    };
+};
+
+// Stage 1: boot CPU only. Enable cpu1..cpu3 after the GICv3 3-cell
+// specifier check passes (see porting.toml, cpu area).
+&cpu1 { status = "disabled"; };
+&cpu2 { status = "disabled"; };
+&cpu3 { status = "disabled"; };
+
+// Peripheral enablement follows component availability:
+//   Stage 1: &blsp2_uart2 (serial console, stock console=ttyHSL0,115200,n8)
+//   Stage 2: &ufshc, &ufsphy        (NativeUfs8996)
+//   Stage 3: &dsi0, &mdp, &blsp2_i2c6 (Mdp5 + BlspI2c + panel/touch)
+//   Stage 4: &gpu, &adreno_smmu     (Adreno530)
+//   Stage 5: &pcie*                 (QCA6174 Wi-Fi)

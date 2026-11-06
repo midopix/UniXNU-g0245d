@@ -1,0 +1,24 @@
+# UniXNU-g0245d board XNU patches.
+#
+# Order matters: the GICv3 3-cell fix must land before any secondary-CPU
+# bring-up, and the BLSP/QUP v2 serial patch must precede BlspI2c work.
+#
+# 0001 - gic-v3-3cell         ArmCpu: accept 3-cell GICv3 interrupt specifiers
+#                             (MSM8996) next to the SM8550 4-cell path.
+# 0002 - blsp-qup-v2          BlspI2c/BlspUart: QUP v2 register layout and
+#                             BLSP1/BLSP2 clock gating for MSM8996.
+# 0003 - smmu-v2              ArmSmmu4K: smmu-v2 context bank layout for
+#                             adreno_smmu@b40000 and the UFS SMMU.
+# 0004 - ufs-2.0              NativeUfs8996: UFS 2.0 register set and
+#                             UniPro 1.8 attributes (not the 3.x/4.x set).
+# 0005 - mdp5-dsi-video       Mdp5: DSI0 video-mode timing source and the
+#                             ft8716 panel command sequence.
+#
+# Each patch is authored against the pinned XNU revision recorded in
+# board.toml/os_profile. Keep one logical change per patch with a
+# rationale header; see https://unixnu.com/xnu/source-and-patches.
+0001-gic-v3-3cell.patch
+0002-blsp-qup-v2.patch
+0003-smmu-v2.patch
+0004-ufs-2.0.patch
+0005-mdp5-dsi-video.patch

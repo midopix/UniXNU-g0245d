@@ -1,0 +1,21 @@
+# Local development overrides for UniXNU-g0245d.
+# Copy to local.toml (git-ignored) and adjust; never commit real paths.
+#
+# Until feeds.toml pins a reviewed SoC commit, point the resolver at the
+# local UniXNU-msm8996-common checkout.
+
+[local]
+# Root of the UniXNU checkout (contains ./unixnu).
+unixnu = "../unixnu-src"
+
+[local.modules]
+# Path overrides for source feeds: "<name>" = "<local path>".
+msm8996 = "../UniXNU-msm8996-common"
+
+[local.paths]
+# REA / Ghidra integration used by the firmware analysis workflow.
+ghidra = "/root/tools/ghidra_12.1.2_PUBLIC"
+
+[local.cache]
+# Shared build/cache directory (optional).
+dir = "/tmp/unixnu-g0245d-cache"

@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""extract-files.py — G0245D firmware input extractor.
+
+Walks the unpacked QFIL tree, classifies the firmware blobs the port needs,
+and (re)generates ``proprietary-files.txt`` with the relative paths, sizes and
+SHA-256 digests. It also parses the Android boot image header and the rawprogram
+XMLs into a JSON summary used by ``board.toml`` and ``porting.toml``.
+
+Usage:
+    scripts/extract-files.py <extracted-dir> [--json out.json] [--list out.txt]
+
+The script is read-only with respect to the input tree.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import struct
+import sys
+import zipfile
+import re
+
+BOOT_MAGIC = b"ANDROID!"
+
+# Classification rules: (label, regex over the relative path, lowercase).
+CLASSIFIERS = [
+    ("kernel", r"(^|/)vmlinux$"),
+    ("boot-image", r"(^|/)boot\.img$"),
+    ("recovery-image", r"(^|/)recovery\.img$"),
+    ("xbl", r"(^|/)(xbl|xblbak)(\.elf)?$"),
+    ("xbl-loader", r"M8996[A-Z0-9]+\.elf$"),
+    ("firehose", r"prog_.*firehose.*\.elf$"),
+    ("abl", r"(^|/)abl(\.elf)?$"),
+    ("tz", r"(^|/)(tz|hyp|rpm|keymaster|cmnlib|devcfg)(\.(mbn|bin|elf))?$"),
+    ("modem", r"(^|/)(modem|NON-HLOS|fsg|mdtp|sec|limits)(\.(mbn|bin))?$"),
+    ("dsp", r"(^|/)(adsp|slpi|dsp)(\.(mbn|bin))?$"),
+    ("bluetooth", r"(^|/)(BTFM|bluetooth)(\.(bin|mbn|txt))?$"),
+    ("wlan", r"qca_cld_wlan\.ko$|\.*.wlan.*"),
+    ("splash", r"(^|/)splash\.img$"),
+    ("partition-map", r"rawprogram.*\.xml$|gpt_.*\.bin$|patch.*\.xml$"),
+    ("device-tree", r"(^|/)board\.dtb$"),
+]
+
+
+def sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def classify(rel: str) -> str:
+    low = rel.lower()
+    for label, pattern in CLASSIFIERS:
+        if re.search(pattern, low):
+            return label
+    return "other"
+
+
+def parse_boot_image(path: str) -> dict:
+    """Parse an Android boot image v0/v1/v2 header (partial, read-only)."""
+    out: dict = {"path": path}
+    with open(path, "rb") as f:
+        header = f.read(4096)
+    if len(header) < 40 or not header.startswith(BOOT_MAGIC):
+        out["error"] = "not an ANDROID boot image"
+        return out
+    (magic, kernel_size, kernel_addr, ramdisk_size, ramdisk_addr,
+     second_size, second_addr, tags_addr, page_size, header_version,
+     os_version_p) = struct.unpack("<8s10I", header[0:48])
+    out.update({
+        "kernel_bytes": kernel_size,
+        "kernel_addr": f"0x{kernel_addr:08x}",
+        "ramdisk_bytes": ramdisk_size,
+        "ramdisk_addr": f"0x{ramdisk_addr:08x}",
+        "tags_addr": f"0x{tags_addr:08x}",
+        "page_size": page_size,
+        "header_version": header_version,
+        "os_version": f"{(os_version_p >> 24) & 0xff}.{(os_version_p >> 16) & 0xff}.{os_version_p & 0xffff}",
+    })
+    # v0 and v1 share the same layout through cmdline: name[16] at 48,
+    # cmdline[512] at 64 (v0 declares offsets 40/44 as unused[2]; v1 reuses
+    # them for header_version/os_version).
+    name = header[48:64].split(b"\x00")[0].decode("ascii", "replace")
+    cmdline = header[64:576].split(b"\x00")[0].decode("ascii", "replace")
+    out["product_name"] = name
+    out["cmdline"] = cmdline
+    return out
+
+
+def _num(value):
+    """Parse a QFIL XML numeric field; keep expressions as strings."""
+    if value is None:
+        return None
+    try:
+        return int(value, 0)
+    except ValueError:
+        return value
+
+
+def parse_rawprogram(path: str) -> dict:
+    """Extract partition names and LBAs from a QFIL rawprogram XML."""
+    try:
+        import xml.etree.ElementTree as ET
+        tree = ET.parse(path)
+    except Exception as exc:  # noqa: BLE001 - report and continue
+        return {"path": path, "error": str(exc)}
+    parts = []
+    for prog in tree.getroot().iter("program"):
+        label = prog.get("label") or prog.get("filename")
+        sector = prog.get("start_sector")
+        num = prog.get("num_partition_sectors")
+        parts.append({
+            "label": label,
+            "start_sector": _num(sector),
+            "sectors": _num(num),
+        })
+    return {"path": path, "partitions": parts}
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("root", help="unpacked QFIL directory")
+    ap.add_argument("--json", help="write the JSON summary here")
+    ap.add_argument("--list", help="write proprietary-files.txt here")
+    args = ap.parse_args()
+
+    root = os.path.abspath(args.root)
+    if not os.path.isdir(root):
+        print(f"error: not a directory: {root}", file=sys.stderr)
+        return 2
+
+    summary: dict = {"root": root, "files": [], "boot_images": [], "rawprograms": []}
+    lines = [
+        "# G0245D proprietary firmware inputs",
+        "# Generated by scripts/extract-files.py — do not edit by hand.",
+        "# Format: <sha256>  <size>  <kind>  <relative-path>",
+    ]
+
+    for dirpath, _dirs, files in os.walk(root):
+        for name in sorted(files):
+            if name in ("manifest.sha256", "inventory.txt"):
+                continue
+            full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, root)
+            kind = classify(rel)
+            size = os.path.getsize(full)
+            digest = sha256(full)
+            summary["files"].append({
+                "path": rel, "kind": kind, "size": size, "sha256": digest,
+            })
+            lines.append(f"{digest}  {size}  {kind}  {rel}")
+
+            if kind == "boot-image":
+                summary["boot_images"].append(parse_boot_image(full))
+            if kind == "partition-map" and name.startswith("rawprogram"):
+                summary["rawprograms"].append(parse_rawprogram(full))
+
+    if args.json:
+        with open(args.json, "w") as f:
+            json.dump(summary, f, indent=2)
+        print(f"[+] JSON summary: {args.json}")
+    if args.list:
+        with open(args.list, "w") as f:
+            f.write("\n".join(lines) + "\n")
+        print(f"[+] proprietary list: {args.list}")
+
+    counts: dict = {}
+    for entry in summary["files"]:
+        counts[entry["kind"]] = counts.get(entry["kind"], 0) + 1
+    print(f"[+] {len(summary['files'])} files classified:")
+    for kind in sorted(counts):
+        print(f"      {kind:<16} {counts[kind]}")
+    for boot in summary["boot_images"]:
+        print(f"[+] boot image: {boot.get('cmdline', boot)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

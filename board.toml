@@ -1,0 +1,137 @@
+schema_version = 2
+
+[board]
+example = false
+name = "g0245d"
+soc = "msm8996"
+soc_source = "msm8996"
+os_profile = "ipados-17.7.11-21H461"
+description = "Gree G0245D (格力手机·色界)"
+kit = "g0245d"
+
+[userdata]
+# Real geometry from the stock QFIL rawprogram_unsparse*.xml (aggregated
+# userdata extents across all LUNs): LBA 74312..14526452, 55.13 GiB of the
+# 64 GB UFS part. LBA size 4096 as reported by the stock UFS 2.0 part.
+# Partition neighbours for reference: boot 39690..56073, system
+# 56074..842457, persist 8..1180, cache 8200..40986.
+first_lba = 74312
+last_lba = 14526452
+lba_bytes = 4096
+windows = [{ name = "OS", component = "OS" }, { name = "SystemOS", component = "Cryptex1,SystemOS" }]
+
+[kernel]
+defconfig = "g0245d_defconfig"
+config_fragments = ["arch:configs/common.config", "soc:configs/msm8996.config", "os:configs/ipados.config"]
+patch_series = ["arch:patches/xnu/series", "soc:patches/xnu/series", "os:patches/xnu/series", "device:patches/xnu/series"]
+
+[firmware]
+# Mu-Silicium checkout with an msm8996 platform package. Replace with the
+# reviewed checkout path when the firmware port lands (porting.toml,
+# firmware area).
+config = "g0245d"
+dsc = "Platforms/Gree/g0245dPkg/g0245d.dsc"
+fd = "Build/g0245dPkg/{target}_CLANGPDB/FV/SILICIUM_UEFI.fd"
+packages = ["{uefi}", "{tree}/package", "{tree}/drivers/DarwinBoot", "{edk2}"]
+
+[firmware.defines]
+DEVICE_MODEL = "g0245d"
+
+[payload]
+volume = "G0245D"
+size_mib = 192
+loader = "firmware"
+title = "UniXNU"
+# Stock boot.img (Android v0 header) facts, parsed by scripts/extract-files.py:
+#   kernel_addr 0x80008000, ramdisk_addr 0x81000000, tags_addr 0x80000100,
+#   page_size 4096, kernel 39343981 B, ramdisk 7778033 B, header_version 0,
+#   cmdline "console=ttyHSL0,115200,n8 androidboot.console=ttyHSL0
+#            androidboot.hardware=qcom user_debug=31 msm_rtb.filter=0x237
+#            ehci-hcd.park=3 lpm_levels.sleep_disabled=1 cma=32M@0-0xffffffff"
+kernel_args = ["-v", "serial=3", "console=ttyHSL0,115200,n8"]
+dram_size = "0x100000000"
+
+[payload.adt]
+chip_id = "820"
+unique_chip_id = "required"
+
+[bootimg]
+# cont_splash_region, verbatim from the stock DTS:
+#   cont_splash_mem@83401000 { reg = <0x00 0x83401000 0x00 0x23ff000>; }
+# The stock ABL leaves the ft8716 panel framebuffer here; the stage 1
+# GopFramebuffer component adopts it.
+#
+# [VERIFIED on hardware] The scanout LK/ABL leaves behind is 24bpp, not 32:
+#   panel 1080x1920, qcom,mdss-dsi-bpp = 0x18 (DTB), stride 3240 B = 1080 px
+#   scan direction 180 deg (row 0 = bottom, col 0 = right)
+#   budget 1080x1920x3 = 6.2 MB of the 36 MB carveout.
+# A 4352 B / 32bpp stride is what the *Android kernel* reprograms later; it is
+# NOT the firmware handoff configuration.
+dtb_node = [{ path = "/reserved-memory/splash_region", props = [{ name = "label", type = "s", value = "cont_splash_region" }, { name = "reg", type = "x", value = ["0x0", "0x83401000", "0x0", "0x23ff000"] }] }]
+
+# mkbootimg v0 parameters, mirroring the stock boot.img header fields
+# (parsed by scripts/extract-files.py): base 0x80000000 + kernel_offset
+# 0x8000 = kernel_addr 0x80008000 (confirmed by the vmlinux entry
+# 0xffffffc000080000); base + tags_offset 0x100 = tags_addr 0x80000100.
+# aboot decompresses the gzip stream to kernel_addr and jumps there with
+# x0 = appended DTB, so gzip(BootShim+FD) lands at 0x80008000.
+[boot_image]
+base = "0x80000000"
+kernel_offset = "0x8000"
+ramdisk_offset = "0x1000000"
+second_offset = "0xf00000"
+tags_offset = "0x100"
+pagesize = 4096
+header_version = 0
+
+# UniXNU UEFI firmware volume destination. Free window above the aboot
+# image (0x91600000-0x916c4478) and below cont_splash_mem_hdmi (0xb1c00000).
+# The FD size must match the built FV byte-exactly (checked at pack time).
+[uefi_fd]
+base = "0x92000000"
+size = "0x300000"
+
+[boot_shim]
+# The stock kernel is an ARM64 Image (magic 'ARMd', text_offset 0x80000,
+# confirmed by Ghidra on emmc_appsboot.mbn) loaded at 0x80008000; the shim
+# must present the same header shape (valid 'ARMd' magic + head.S-style code0
+# branch) so aboot accepts the decompressed stream and jumps to kernel_entry.
+requires_kernel_header = true
+
+[device_tree]
+source = "device:dts/g0245d.dts"
+include_dirs = ["soc:dts"]
+
+[components]
+# Stage 1 minimal set (see README): platform, CPU, crypto, prelink, loader.
+# No SM8550-specific components (ShengUfs/Adreno740/...) are selected:
+# MSM8996 needs NativeUfs8996 / Adreno530 / Mdp5 / BlspI2c components first.
+include = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "XnuPrelink", "DarwinBoot"]
+
+[adt]
+
+[adt.product]
+
+[adt.product.string]
+model = "gree,g0245d"
+artwork-display-gamut = "sRGB"
+
+[adt.product.u32]
+thin-bezel = 1
+
+[adt.defaults]
+
+[adt.defaults.u32]
+sleep-disabled = 1
+
+[adt.buttons]
+
+[adt.buttons.string]
+compatible = "buttons"
+device_type = "buttons"
+
+[adt.buttons.strings]
+button-names = ["hold", "voldown", "volup"]
+
+[adt.buttons.u32]
+home-button-type = 2
