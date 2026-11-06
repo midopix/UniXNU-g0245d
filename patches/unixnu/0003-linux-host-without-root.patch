@@ -1,0 +1,83 @@
+diff --git a/scripts/linux/setup-toolchain.py b/scripts/linux/setup-toolchain.py
+index 2bbb6ed..2aa96f6 100755
+--- a/scripts/linux/setup-toolchain.py
++++ b/scripts/linux/setup-toolchain.py
+@@ -231,7 +231,11 @@ def llvm(prefix, work, jobs, host):
+ 
+ def shims(clt, xctoolchain, clang):
+     (clt / 'bin').mkdir(parents=True, exist_ok=True)
+-    for name, directory in [(n, clt / 'bin') for n in CLT_SHIMS] + [(n, Path('/usr/bin')) for n in USR_BIN_SHIMS]:
++    # G0245D: USR_BIN_SHIMS went to /usr/bin, which needs root. Put them in the
++    # prefix's bin (already on the kernel step's PATH) so an unprivileged
++    # install works.
++    (clt.parents[1] / 'bin').mkdir(parents=True, exist_ok=True)
++    for name, directory in [(n, clt / 'bin') for n in CLT_SHIMS] + [(n, clt.parents[1] / 'bin') for n in USR_BIN_SHIMS]:
+         shutil.copyfile(HERE / name, directory / name)
+         (directory / name).chmod(0o755)
+     env = dict(os.environ, CROSS_CLANG=str(clang), XNU_TOOLCHAIN_BIN=f'{clt / "bin"} {xctoolchain / "bin"}')
+@@ -359,10 +363,14 @@ def main(argv=None):
+     if args.jobs < 1:
+         parser.error('--jobs must be positive')
+     if not args.check:
+-        if os.geteuid():
++        # G0245D: an unprivileged install is fine with --package-manager none
++        # (the host dependencies are already present); only the package step
++        # and the /usr/bin shims needed root, and both are handled above.
++        if os.geteuid() and args.package_manager != 'none':
+             parser.error('installation requires root; use --check to inspect host dependencies')
+-        for command in package_commands(package_manager(args.package_manager)):
+-            run(command, env=dict(os.environ, DEBIAN_FRONTEND='noninteractive'))
++        if not os.geteuid():
++            for command in package_commands(package_manager(args.package_manager)):
++                run(command, env=dict(os.environ, DEBIAN_FRONTEND='noninteractive'))
+     host = host_tools(args.llvm_config)
+     if args.check:
+         print(f'host dependencies ready: {host.cc}, {host.config}')
+diff --git a/scripts/unixnu/devicetree.py b/scripts/unixnu/devicetree.py
+index bbb1fe6..e569845 100644
+--- a/scripts/unixnu/devicetree.py
++++ b/scripts/unixnu/devicetree.py
+@@ -190,15 +190,21 @@ ARM_IO_ALIGN = 1 << 24
+ 
+ 
+ def arm_io_window(hardware):
+-    """The arm-io window: child registers are offsets from its base, which XNU reads as the SoC base and requires to be non-zero."""
++    """The arm-io window: child registers are offsets from its base.
++
++    XNU reads the SoC base from arm-io's `ranges` parent address
++    (pe_arm_get_soc_base_phys), and `0` is a legal value there: MSM8996 keeps
++    UFS at 0x624000, BLSP1 at 0x75xxxx and MDSS at 0x900000, so the window
++    starts at physical 0 and every child offset is already an absolute
++    address. The old non-zero assertion treated "window starts at 0" as "no
++    window found", which is only true when the entry is missing altogether.
++    """
+     spans = [(physical(entry.parent, address, size), size) for entry in hardware if 'reg' in entry.properties
+              for address, size in registers(entry)]
+     if not spans:
+         return ARM_IO_ALIGN, ARM_IO_ALIGN
+     base = min(address for address, _ in spans) & ~(ARM_IO_ALIGN - 1)
+     top = -(-max(address + size for address, size in spans) // ARM_IO_ALIGN) * ARM_IO_ALIGN
+-    if not base:
+-        raise Error('arm-io needs a non-zero base: an exported register lies below 16 MiB')
+     return base, top - base
+ 
+ 
+diff --git a/scripts/unixnu/kernel.py b/scripts/unixnu/kernel.py
+index ac2723c..29f0422 100644
+--- a/scripts/unixnu/kernel.py
++++ b/scripts/unixnu/kernel.py
+@@ -87,8 +87,13 @@ def linux_env(ctx):
+     """
+     toolchain = Path(os.environ.get('UNIXNU_TOOLCHAIN', '/opt/unixnu-linux'))
+     clt, xctoolchain = toolchain / 'CommandLineTools/usr', toolchain / 'XcodeDefault.xctoolchain/usr'
++    # G0245D: an unprivileged install keeps the xcrun/plutil/codesign shims in
++    # the prefix's bin instead of /usr/bin.
++    xcrun = toolchain / 'bin/xcrun'
++    if not xcrun.exists():
++        xcrun = Path('/usr/bin/xcrun')
+     for path in (toolchain / 'llvm/bin/clang', clt / 'bin/ld', clt / 'bin/xnu-host-cc', clt / 'libexec/migcom',
+-                 xctoolchain / 'bin/iig', Path('/usr/bin/xcrun'), toolchain / 'bin/lzfse'):
++                 xctoolchain / 'bin/iig', xcrun, toolchain / 'bin/lzfse'):
+         if not path.exists():
+             raise Error(f'{path} missing; run "sudo scripts/linux/setup-toolchain.py {toolchain}"')
+     fakeroot = ctx.tree / '.cache/fakeroot'

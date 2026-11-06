@@ -42,7 +42,9 @@ limits = [
   "The board package is consumed as an overlay on a pinned Mu-Silicium checkout; uefi-g0245d itself is not a full EDK II tree.",
 ]
 next_action = [
-  "Flash v100 and confirm the countdown advances; then re-enable cpu1..cpu3 behind the 3-cell GIC check.",
+  "Flash boot-noramdisk.img (612 KiB, stock kernelcache + our ADT) to see how far XNU gets; expect an early panic until the five device patches exist.",
+  "Build the XNU toolchain on a host with more than two cores: scripts/linux/setup-toolchain.py needs the LLVM source unpacked (126k files) plus a Release+Assertions build.",
+  "Author the five device patches (gic-v3-3cell, blsp-qup-v2, smmu-v2, ufs-2.0, mdp5-dsi-video); patches/xnu/series lists them but no file exists yet.",
 ]
 evidence = [
   "firmware/extracted/G0245D_Gree_user_QFIL_images/board.dtb (341047 bytes) -> board.dts (16530 lines).",

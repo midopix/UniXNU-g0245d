@@ -154,3 +154,20 @@ the menu shows Tools with no payload volume at all; the volume only replaces tha
 built-in menu. What was missing is the plugin behind Tools, and that is
 `UniXNUPkg/Driver/AdvancedLogDxe` — it needs the Advanced Logger buffer, not a
 payload. v101 wires the buffer (see uefi-g0245d `docs/advanced-logger.md`).
+
+**`arm_io_window()`'s non-zero base assertion is wrong for MSM8996.** The packer
+refused to build a payload because UFS sits at `0x624000`. XNU reads the SoC base
+from arm-io's `ranges` parent address (`pexpert/arm/pe_identify_machine.c`,
+`pe_arm_get_soc_base_phys`), and `0` is a legal value there: `gPicBase = soc_phys
++ offset` then yields the absolute physical address, which is exactly right for a
+SoC whose address space starts at 0. The assertion conflated "window starts at 0"
+with "no window found". Patch `patches/unixnu/0003-linux-host-without-root.patch`
+drops it; `unixnu payload` then produces a 192 MiB `payload.img`.
+
+**BootShim's ARM64 `image_size` must cover the shim itself.** `BootShim.S` wrote
+`FD_SIZE`, so `unixnu bootimg` rejected the image ("the ARM64 image header does
+not describe the shim plus the firmware volume"). aboot ignores the field, which
+is why the local packer never noticed. The value must be `shim length + FD_SIZE`;
+use a label difference `(_Payload - _Head)`, because an absolute `_Payload`
+reference needs a relocation that `llvm-objcopy -O binary` cannot apply.
+Patch: `uefi-g0245d/patches/mu/0002-bootshim-image-size.patch`.
