@@ -2,6 +2,7 @@
 name = "msm8996"
 kind = "soc"
 git = "https://github.com/midopix/UniXNU-msm8996-common"
-# Pinned to the first published SoC commit. Re-pin whenever the SoC repository
-# changes; the resolver falls back to local.toml during development.
-commit = "8dcce79a0fa907d5ac59819e469210e3cba23998"
+# Pinned to the SoC commit that carries the MSM8996 SMP / dual-cluster patch.
+# Re-pin whenever the SoC repository changes; the resolver falls back to
+# local.toml during development.
+commit = "4007997af4ed9db34c8dadcd44d9ce7a8b22ab7a"
