@@ -24,6 +24,24 @@ windows = [{ name = "OS", component = "OS" }, { name = "SystemOS", component = "
 defconfig = "g0245d_defconfig"
 config_fragments = ["arch:configs/common.config", "soc:configs/msm8996.config", "os:configs/ipados.config"]
 patch_series = ["arch:patches/xnu/series", "soc:patches/xnu/series", "os:patches/xnu/series", "device:patches/xnu/series"]
+# schema_version=2 的 archive_plan() 一旦看到任何 component: 条目就进入 explicit
+# 模式：只编译显式列出的组件，其余 kernel 阶段组件会触发
+# "archives needs component entries" 错误。arch/arm64/profile.toml 自带三个
+# component: 条目，而分层合并里列表是替换而非拼接，因此设备层必须给出完整列表，
+# 把三个 MSM8996 驱动一并列出。顺序：组件先编，依赖它们的脚本后跑。
+archives = [
+  "build-corecrypto-14.py",
+  "build-corecrypto-14.py --namespace",
+  "component:ArmDTPlatform",
+  "component:ArmCpu",
+  "component:SoftwareAES",
+  "component:NativeUfs8996",
+  "component:Blsp8996",
+  "component:Adreno530",
+  "build-software-aes-bindings.py",
+  "build-mockfs-fixture.py",
+  "build-libpthread-kernel.py",
+]
 
 [firmware]
 # Mu-Silicium checkout with an msm8996 platform package. Replace with the
@@ -102,11 +120,33 @@ requires_kernel_header = true
 source = "device:dts/g0245d.dts"
 include_dirs = ["soc:dts"]
 
+# 预链接配置主要来自 os profile（profiles/os/ipados-17.7.11-21H461/profile.toml）：
+# tool / kernel(.noctf) / slide / early_security_init / roots(31 个) /
+# kernelcache_sha256 都在那里，分层合并会逐键继承。设备层只补一项：
+# kernelcache 直连本机已解压的 21H461 kernelcache（路径相对构建树 root），
+# 这样 prelink 不必构造 Ipsw 去读远程 6.8 GiB IPSW，也不需要网络。
+# 注意：不要在设备层写 roots —— 列表是「替换」而非「拼接」，会把 profile 的
+# 31 个 identifier 覆盖掉，导致 early_security_init 指向的 AMFI 未被选中而报错。
+[kernel.prelink]
+kernelcache = "../../../../ipsw/21H461/kernelcache.decompressed"
+
+# [ipsw] 元数据同样由 os profile 提供（含远程 url 与 [ipsw.sha256] pins）。
+# 这里只把 url 覆盖为本机已缓存的 IPSW，避免 unixnu ipsw / watchdog 自动
+# 完整预链接时联网下载；其余字段与 profile 保持一致。
+[ipsw]
+url = "/home/myth/WorkBuddy/2026-11-06-14-39-31/g0245d/workspace/tmp/ipsw-cache/21H461.ipsw"
+
 [components]
-# Stage 1 minimal set (see README): platform, CPU, crypto, prelink, loader.
-# No SM8550-specific components (ShengUfs/Adreno740/...) are selected:
-# MSM8996 needs NativeUfs8996 / Adreno530 / Mdp5 / BlspI2c components first.
-include = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "XnuPrelink", "DarwinBoot"]
+# Stage 1 set: platform, CPU, crypto, prelink, loader — baseline bring-up.
+# Plus the four MSM8996 (G0245D) native driver components, integrated
+# 2026-11-07. NativeUfs8996 / Blsp8996 / Adreno530 are build_stage=kernel
+# drivers compiled to .a and linked into the kernel (probe-only scaffolds:
+# they map MMIO, read a capability/status register, publish a diagnostic
+# node, and do NOT perform real storage/I2C/GPU bring-up yet — see each
+# driver's header comment and README.md). Msm8996Platform is an
+# build_stage=embedded kit (compiled separately, currently a stub
+# returning -1); it is pulled in as a dependency of Adreno530.
+include = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "XnuPrelink", "DarwinBoot", "NativeUfs8996", "Blsp8996", "Adreno530", "Msm8996Platform"]
 
 [adt]
 

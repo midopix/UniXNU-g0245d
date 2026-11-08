@@ -11,4 +11,11 @@ CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
 # CONFIG_XNU_NATIVE_LEGACY_DISPLAY is not set (needs GopFramebuffer + firmware FB)
 # Secondary CPU bring-up: enable after the GIC 3-cell specifier check passes.
 # CONFIG_XNU_ARMCPU_SECONDARY is not set
-# CONFIG_XNU_BUILD_ARCHIVES is not set    (enable with the first native driver)
+# arch:configs/common.config turns on CONFIG_XNU_BUILD_ARCHIVES=y, so
+# build_archives() compiles every selected kernel-stage component. The three
+# MSM8996 driver archives have no dedicated XNU_* link gate in
+# build-xnu-4k-baseline.sh, so they are linked through the generic
+# CONFIG_XNU_EXTRA_LD_ARCHIVES extension point (same pattern as fuxi/sheng).
+# {tree} is expanded to the absolute build-tree path in scripts/unixnu/kernel.py.
+# Msm8996Platform is an embedded kit with no archive of its own.
+CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/native-ufs-8996/libNativeUfs8996.a -Wl,-force_load,{tree}/build/blsp-8996/libBlsp8996.a -Wl,-force_load,{tree}/build/adreno530/libAdreno530.a"
