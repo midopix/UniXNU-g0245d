@@ -57,7 +57,11 @@ DEVICE_MODEL = "g0245d"
 
 [payload]
 volume = "G0245D"
-size_mib = 192
+# 2026-11-09: 24 MiB — the payload rides in boot.img's ramdisk slot, and the
+# stock boot partition is at most ~64 MiB (kernel slot alone is ~31.6 MB).
+# Content is 18.3 MB (kernel.macho + adt + unixnu.toml), well under the
+# 0.95 * size guard.
+size_mib = 24
 loader = "firmware"
 title = "UniXNU"
 # Stock boot.img (Android v0 header) facts, parsed by scripts/extract-files.py:

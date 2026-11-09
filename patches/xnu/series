@@ -11,3 +11,10 @@
 # EPERM whenever the export headers are regenerated. Ignoring the timestamp
 # failure keeps the installed bytes and mode intact.
 zzz-g0245d-linux-installfile-futimes.patch
+
+# G0245D bring-up: three solid white bands painted into the firmware framebuffer
+# from osfmk/arm64/start.s while the MMU is still off (stage 0 = entered
+# start_first_cpu, 1 = bootstrap page tables built, 2 = about to enable the MMU).
+# This board has no serial console and the tree has no arm64 framebuffer console,
+# so counting the bands is the only way to see how far the kernel gets.
+zzz-g0245d-early-boot-marks.patch
