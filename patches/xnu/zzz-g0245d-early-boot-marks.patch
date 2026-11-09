@@ -1,0 +1,96 @@
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -91,6 +91,32 @@
+ .endmacro
+ 
+ /*
++ * g0245d early-boot progress marks: one solid white band per stage, painted
++ * into the firmware framebuffer while the MMU is still off. This board has no
++ * serial console and the tree has no arm64 framebuffer console, so counting the
++ * bands is the only way to see how far the kernel gets. Band i occupies raw row
++ * 200 + 64*i, 32 rows tall, so the stripes stay separate in a photograph.
++ * Clobbers x9-x13.
++ */
++.macro BOOT_MARK argsreg, index
++	ldr	x9, [\argsreg, #0x28]			// Video[0] = framebuffer PA
++	cbz	x9, 9f
++	ldr	x10, [\argsreg, #0x38]			// Video[2] = row bytes
++	cbz	x10, 9f
++	mov	x11, #(200 + 64 * \index)
++	mul	x11, x11, x10
++	add	x9, x9, x11
++	mov	x12, #32
++	mul	x12, x12, x10
++	lsr	x12, x12, #2
++	mov	w13, #0xFFFFFFFF
++1:	str	w13, [x9], #4
++	subs	x12, x12, #1
++	b.ne	1b
++9:
++.endm
++
++/*
+  * Checks the reset handler for global and CPU-specific reset-assist functions,
+  * then jumps to the reset handler with boot args and cpu data. This is copied
+  * to the first physical page during CPU bootstrap (see cpu.c).
+@@ -460,6 +486,9 @@
+ 	.globl EXT(start_first_cpu)
+ LEXT(start_first_cpu)
+ 
++	// g0245d: stage 0 - kernel entry point reached.
++	BOOT_MARK x0, 0
++
+ 	// Unlock the core for debugging
+ 	msr		OSLAR_EL1, xzr
+ 	msr		DAIFSet, #(DAIFSC_ALL)				// Disable all interrupts
+@@ -637,6 +666,9 @@
+  */
+ common_start:
+ 
++	// g0245d: stage 1 - bootstrap page tables built.
++	BOOT_MARK x20, 1
++
+ #if HAS_NEX_PG
+ 	mov x19, lr
+ 	bl		EXT(set_nex_pg)
+@@ -649,6 +681,9 @@
+ 	ldr		x1, [x0, SR_RESTORE_TCR_EL1]
+ 	MSR_TCR_EL1_X1
+ 
++	// g0245d: stage 3 - TCR programmed.
++	BOOT_MARK x20, 3
++
+ 	/* Set up translation table base registers.
+ 	 *	TTBR0 - V=P table @ top of kernel
+ 	 *	TTBR1 - KVA table @ top of kernel + 1 page
+@@ -666,6 +701,9 @@
+ 	and		x0, x0, #(TTBR_BADDR_MASK)
+ 	MSR_TTBR1_EL1_X0
+ 
++	// g0245d: stage 4 - TTBR0/TTBR1 programmed.
++	BOOT_MARK x20, 4
++
+ 	// Set up MAIR attr0 for normal memory, attr1 for device memory
+ 	mov		x0, xzr
+ 	mov		x1, #(MAIR_WRITEBACK << MAIR_ATTR_SHIFT(CACHE_ATTRINDX_WRITEBACK))
+@@ -696,6 +734,9 @@
+ 	tlbi	vmalle1
+ 	dsb		ish
+ 
++	// g0245d: stage 5 - MAIR programmed.
++	BOOT_MARK x20, 5
++
+ 
+ #if defined(BCM2837) && (!defined(XNU_NATIVE_ARCH_TIMER) || !XNU_NATIVE_ARCH_TIMER)
+ 	// Setup timer interrupt routing; must be done before MMU is enabled
+@@ -751,6 +792,10 @@
+ 	PAC_INIT_KEY_STATE tmp=x0, tmp2=x1
+ #endif /* HAS_APPLE_PAC */
+ 
++	// g0245d: stage 2 - about to enable the MMU (last mark: the bootstrap
++	// tables map the kernel image, not the panel).
++	BOOT_MARK x20, 2
++
+ 	// Enable caches, MMU, ROP and JOP
+ 	MOV64   x0, SCTLR_EL1_DEFAULT
+ 	MSR_SCTLR_EL1_X0

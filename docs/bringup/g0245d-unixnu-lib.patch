@@ -1,0 +1,330 @@
+diff --git a/package/UniXNUPkg/Library/UniXNULib/Boot.c b/package/UniXNUPkg/Library/UniXNULib/Boot.c
+index 4b1e737..bf7af32 100644
+--- a/package/UniXNUPkg/Library/UniXNULib/Boot.c
++++ b/package/UniXNUPkg/Library/UniXNULib/Boot.c
+@@ -58,9 +58,18 @@ RunXnu (
+   Status = gBS->LocateProtocol (&gUniXNULoaderProtocolGuid, NULL, (VOID **)&Loader);
+   if (EFI_ERROR (Status)) {
+     UniXNULog ("xnu: no loader protocol installed; UniXNU does not provide one");
+-    return EFI_UNSUPPORTED;
++    //
++    // Distinct status: "Not Found" on the menu means the loader never published
++    // its protocol, "Unsupported" means one did but disagrees with us.
++    //
++    return EFI_NOT_FOUND;
+   }
+ 
++  UniXNULog ("xnu: loader 0x%lx revision 0x%x boot 0x%lx",
++             (UINT64)(UINTN)Loader,
++             (UINT32)Loader->Revision,
++             (UINT64)(UINTN)Loader->Boot);
++
+   if (((Loader->Revision != UNIXNU_LOADER_REVISION_1) &&
+        (Loader->Revision != UNIXNU_LOADER_REVISION)) || (Loader->Boot == NULL))
+   {
+@@ -83,8 +92,23 @@ RunXnu (
+   Request.Volume         = Entry->Volume;
+   Request.KernelPath     = Entry->Path;
+   Request.BootArgs       = Entry->Args;
+-  Request.DeviceTree     = Fdt;
+-  Request.DeviceTreeSize = FdtSize;
++  //
++  // v111: the Darwin loader owns the device tree. DarwinBoot reads
++  // <kernel>.adt from the same volume as the kernel and its Boot() callback
++  // answers EFI_UNSUPPORTED to any caller-supplied tree, which is exactly what
++  // the menu reported on the device ("'UniXNU' returned: Unsupported").
++  // The tree still gets built above for the efi/linux paths and for the config
++  // patches; it is simply not forwarded here.
++  //
++  if ((Fdt != NULL) || (FdtSize != 0)) {
++    UniXNULog (
++      "xnu: loader owns the tree (<kernel>.adt); firmware DT of %u bytes not forwarded",
++      (UINT32)FdtSize
++      );
++  }
++
++  Request.DeviceTree     = NULL;
++  Request.DeviceTreeSize = 0;
+   Request.Ramdisk        = Ramdisk;
+   Request.RamdiskSize    = RamdiskSize;
+   Request.Kexts          = Kexts;
+@@ -140,6 +164,7 @@ UniXNUBootEntry (
+ 
+   Status = UniXNUPrepareDeviceTree (Config, Entry, &Fdt, &FdtSize);
+   if (EFI_ERROR (Status)) {
++    UniXNULog ("boot: device tree preparation failed: %r", Status);
+     return Status;
+   }
+ 
+diff --git a/package/UniXNUPkg/Library/UniXNULib/Config.c b/package/UniXNUPkg/Library/UniXNULib/Config.c
+index 6571546..d054858 100644
+--- a/package/UniXNUPkg/Library/UniXNULib/Config.c
++++ b/package/UniXNUPkg/Library/UniXNULib/Config.c
+@@ -35,10 +35,13 @@
+ STATIC CONST CHAR8  mBuiltinConfig[] =
+   "version = 1\n"
+   "[boot]\n"
+-  // 60s: G0245D has no verified working keypad yet; 10s was too short to
+-  // reach the Tools entry even with the rotate cycle carrying the highlight.
+-  "timeout = 60\n"
+-  "rotate = 2\n"
++  // v106 keypad-diagnosis build: the highlight MUST stay still, otherwise an
++  // automatic rotation is indistinguishable from a working Up/Down key.
++  // "rotate = 0" is now honoured (Menu.c no longer silently restores
++  // DEFAULT_ROTATE_SEC).  300 s is only a safety net: the first real key
++  // press sets UserActive and stops the countdown for good.
++  "timeout = 300\n"
++  "rotate = 0\n"
+   "[ui]\n"
+   "title = \"UniXNU\"\n"
+   "[[entry]]\n"
+@@ -1510,6 +1513,7 @@ TryVolume (
+ 
+   Status = UniXNUReadFile (Volume, (CONST CHAR16 *)PcdGetPtr (PcdUniXNUConfigPath), (VOID **)&Text, &Size);
+   if (EFI_ERROR (Status)) {
++    UniXNULog ("config: volume 0x%lx: open %s -> %r", (UINT64)(UINTN)Volume, "unixnu.toml", Status);
+     return FALSE;
+   }
+ 
+@@ -1555,6 +1559,12 @@ UniXNUConfigLoad (
+ 
+   if (!Loaded && (Config->Error[0] == '\0')) {
+     Status = gBS->LocateHandleBuffer (ByProtocol, &gEfiSimpleFileSystemProtocolGuid, NULL, &Count, &Handles);
++    //
++    // G0245D: without this the "no boot entry found" case cannot be told apart
++    // from "the FAT driver never published a volume" (fs 0) on a machine with
++    // no serial console.
++    //
++    UniXNULog ("config: fs %u volumes", EFI_ERROR (Status) ? 0 : (UINT32)Count);
+     if (!EFI_ERROR (Status)) {
+       for (Index = 0; Index < Count && !Loaded && Config->Error[0] == '\0'; Index++) {
+         Loaded = TryVolume (Config, Handles[Index]);
+diff --git a/package/UniXNUPkg/Library/UniXNULib/Inject.c b/package/UniXNUPkg/Library/UniXNULib/Inject.c
+index 08f07b8..2ced6ee 100644
+--- a/package/UniXNUPkg/Library/UniXNULib/Inject.c
++++ b/package/UniXNUPkg/Library/UniXNULib/Inject.c
+@@ -13,6 +13,7 @@
+ #include <IndustryStandard/Acpi.h>
+ #include <Library/FdtLib.h>
+ #include <Protocol/AcpiTable.h>
++#include <Protocol/BlockIo.h>
+ #include <Protocol/LoadFile2.h>
+ 
+ //
+@@ -33,6 +34,7 @@ UniXNUConnectAll (
+   EFI_HANDLE  *Handles;
+   UINTN       Count;
+   UINTN       Index;
++  UINTN       Pass;
+ 
+   Status = gBS->LocateHandleBuffer (AllHandles, NULL, NULL, &Count, &Handles);
+   if (EFI_ERROR (Status)) {
+@@ -44,6 +46,27 @@ UniXNUConnectAll (
+   }
+ 
+   FreePool (Handles);
++
++  //
++  // The storage stack cascades on one handle: DiskIoDxe, PartitionDxe and
++  // EnhancedFatDxe all bind to the same BlockIo controller, and a driver that
++  // was already probed in a pass does not get asked again inside that pass.
++  // Re-connecting just the BlockIo producers lets the file system driver see
++  // the DiskIo protocol that appeared one step earlier. Three passes cover
++  // DiskIo -> Partition -> Fat; extra passes are cheap no-ops.
++  //
++  for (Pass = 0; Pass < 3; Pass++) {
++    Status = gBS->LocateHandleBuffer (ByProtocol, &gEfiBlockIoProtocolGuid, NULL, &Count, &Handles);
++    if (EFI_ERROR (Status)) {
++      break;
++    }
++
++    for (Index = 0; Index < Count; Index++) {
++      gBS->ConnectController (Handles[Index], NULL, NULL, TRUE);
++    }
++
++    FreePool (Handles);
++  }
+ }
+ 
+ //
+diff --git a/package/UniXNUPkg/Library/UniXNULib/Internal.h b/package/UniXNUPkg/Library/UniXNULib/Internal.h
+index 2524c40..4227bea 100644
+--- a/package/UniXNUPkg/Library/UniXNULib/Internal.h
++++ b/package/UniXNUPkg/Library/UniXNULib/Internal.h
+@@ -54,6 +54,12 @@ UniXNULog (
+   ...
+   );
+ 
++///
++/// Last line UniXNULog produced, mirrored into a Unicode buffer so the menu can
++/// show why the last boot attempt failed on a machine with no serial console.
++///
++extern CHAR16  gUniXNULastLog[96];
++
+ // ---------------------------------------------------------------------------
+ // TOML subset (Toml.c)
+ // ---------------------------------------------------------------------------
+diff --git a/package/UniXNUPkg/Library/UniXNULib/Main.c b/package/UniXNUPkg/Library/UniXNULib/Main.c
+index 1ce85c2..f18b095 100644
+--- a/package/UniXNUPkg/Library/UniXNULib/Main.c
++++ b/package/UniXNUPkg/Library/UniXNULib/Main.c
+@@ -11,9 +11,16 @@
+ #include <Protocol/Cpu.h>
+ #include <Protocol/Timer.h>
+ #include <Protocol/HardwareInterrupt.h>
++#include <Protocol/UniXNULoader.h>
+ 
+ STATIC EFI_SERIAL_IO_PROTOCOL  *mSerial;
+ 
++//
++// Mirrored here, not in the log file: with no serial console and no readable
++// memory, the menu is the only place a failure reason can survive.
++//
++CHAR16  gUniXNULastLog[96];
++
+ VOID
+ UniXNULogInit (
+   VOID
+@@ -42,6 +49,16 @@ UniXNULog (
+   VA_END (Args);
+   AsciiStrCatS (Line, sizeof (Line), "\r\n");
+ 
++  //
++  // Mirror the message (without the prefix and the line ending) into Unicode so
++  // the menu can echo it after a boot attempt fails.
++  //
++  for (Size = Prefix; (Line[Size] != '\0') && (Line[Size] != '\r') && (Size - Prefix < 95); Size++) {
++    gUniXNULastLog[Size - Prefix] = (CHAR16)(UINT8)Line[Size];
++  }
++
++  gUniXNULastLog[Size - Prefix] = L'\0';
++
+   DEBUG ((PcdGet32 (PcdUniXNUDebugLevel), "%a", Line));
+   if (mSerial != NULL) {
+     Size = AsciiStrLen (Line);
+@@ -129,6 +146,7 @@ UniXNURun (
+     BOOLEAN                IrqState;
+     UINT32                 CpuOk, HwOk, IrqOn, TmrOk;
+     UINT64                 Pct1, Pct2;
++    UINT64                 El;
+     volatile UINTN         Spin;
+ 
+     CpuOk    = 0;
+@@ -143,6 +161,13 @@ UniXNURun (
+     HwOk  = EFI_ERROR (gBS->LocateProtocol (&gHardwareInterruptProtocolGuid, NULL, &Proto)) ? 0 : 1;
+     TmrOk = EFI_ERROR (gBS->LocateProtocol (&gEfiTimerArchProtocolGuid, NULL, &Proto)) ? 0 : 1;
+ 
++    //
++    // v111: the Darwin loader only accepts a hand-off at EL1. Show the level the
++    // firmware actually runs at, so a photo of the menu answers the question
++    // without waiting for an Advanced Logger capture.
++    //
++    __asm__ volatile ("mrs %0, CurrentEL" : "=r" (El));
++
+     Pct1 = ArmReadCntPctReg ();
+     for (Spin = 0; Spin < 300000; Spin++) {
+     }
+@@ -151,10 +176,11 @@ UniXNURun (
+     UnicodeSPrint (
+       Ui.Info,
+       sizeof (Ui.Info),
+-      L"drv %u/%u kit %u | CPU%u HW%u IRQ%u TMR%u PCT%u",
++      L"drv %u/%u kit %u | EL%u CPU%u HW%u IRQ%u TMR%u PCT%u",
+       (UINT32)Stats.DriversLoaded,
+       (UINT32)Stats.DriversFailed,
+       (UINT32)Config.KitsLoaded,
++      (UINT32)(El >> 2),
+       CpuOk,
+       HwOk,
+       IrqOn,
+@@ -208,7 +234,26 @@ UniXNURun (
+     // The payload returned or failed: back to the menu, without the
+     // countdown so a broken default cannot loop on a machine with input.
+     //
+-    UnicodeSPrint (Ui.Notice, sizeof (Ui.Notice), L"'%s' returned: %r", Entry->Title, Status);
++    //
++    // The status alone cannot tell a missing loader protocol from a rejected
++    // hand-off, so the last log line travels with it. The Darwin loader also
++    // parks a more specific reason in a variable of its own -- its Print output
++    // is painted over as soon as the menu redraws -- and that one wins.
++    //
++    {
++      CHAR16  Diag[96];
++      UINTN   DiagSize = sizeof (Diag);
++      CHAR16  *Reason  = gUniXNULastLog;
++
++      if (!EFI_ERROR (gRT->GetVariable (L"UniXNUBootDiag", &gUniXNULoaderProtocolGuid, NULL, &DiagSize, Diag)) &&
++          (Diag[0] != L'\0'))
++      {
++        Reason = Diag;
++      }
++
++      UnicodeSPrint (Ui.Notice, sizeof (Ui.Notice), L"'%s' returned: %r | %s", Entry->Title, Status, Reason);
++    }
++
+     UniXNULog ("menu: entry %u returned %r", (UINT32)Index, Status);
+     gBS->SetWatchdogTimer (0, 0, 0, NULL);
+     Countdown = FALSE;
+diff --git a/package/UniXNUPkg/Library/UniXNULib/Menu.c b/package/UniXNUPkg/Library/UniXNULib/Menu.c
+index e3e4619..fe045ce 100644
+--- a/package/UniXNUPkg/Library/UniXNULib/Menu.c
++++ b/package/UniXNUPkg/Library/UniXNULib/Menu.c
+@@ -14,7 +14,7 @@
+ #include "Internal.h"
+ 
+ #define TICK_MS             100
+-#define DEFAULT_ROTATE_SEC  2
++// v106: no implicit rotation default; "rotate = 0" means disabled.
+ 
+ #ifndef SCAN_SUSPEND
+ #define SCAN_SUSPEND  0x0102
+@@ -119,10 +119,14 @@ UniXNUMenuRun (
+     RemainingMs = Config->Timeout * 1000;
+   }
+ 
++  //
++  // v106: "rotate = 0" means DISABLED.  The old fallback silently restored
++  // DEFAULT_ROTATE_SEC whenever no input device was found, which made the
++  // highlight drift on its own -- visually identical to a working keypad
++  // and the direct cause of a false "keys work" read on 2026-11-09.
++  // Rotate only when the configuration explicitly asks for it.
++  //
+   RotateMs = Config->RotateSeconds * 1000;
+-  if (!HasInput && (RotateMs == 0)) {
+-    RotateMs = DEFAULT_ROTATE_SEC * 1000;
+-  }
+ 
+   UniXNUUiDrawFrame (Ui, Config);
+   for (Index = 0; Index < Count; Index++) {
+diff --git a/scripts/unixnu/payload.py b/scripts/unixnu/payload.py
+index 0774c8e..3126957 100644
+--- a/scripts/unixnu/payload.py
++++ b/scripts/unixnu/payload.py
+@@ -73,13 +73,26 @@ def check_native_root(kernel, arguments, vmm_present=False):
+         raise Error('the native UFS root kernel lacks the linked sheng PMGR integration')
+ 
+ 
++def uses_fat32(sectors):
++    """Only force FAT32 when the volume really has enough clusters for it.
++
++    mtools formats 512-byte clusters, so a FAT32 volume needs at least 65525 of
++    them (33.5 MiB). EDK2's FAT driver rejects a smaller FAT32 boot sector with
++    EFI_VOLUME_CORRUPTED (FatPkg/EnhancedFatDxe/FatFileSystem.h keeps the limit
++    as FAT_MAX_FAT16_CLUSTER, 0xFFF5), so it never publishes SimpleFileSystem and
++    the payload looks empty on the device while mdir reads it fine. Below the
++    limit let mformat pick the smaller FAT type instead."""
++    return sectors > 0xFFF5 + 0x400
++
++
+ def write_volume(stage, image, label, size_mib):
+     for tool_name in ('mformat', 'mcopy'):
+         tool(tool_name, 'brew install mtools')
+     image.unlink(missing_ok=True)
+     env = dict(os.environ, MTOOLS_SKIP_CHECK='1', TZ='UTC')
+     sectors = size_mib * 2048
+-    run(['mformat', '-C', '-F', '-T', str(sectors), '-v', label, '-N', '53484e47', '-i', image, '::'], env=env, capture=True)
++    layout = ['-F'] if uses_fat32(sectors) else []
++    run(['mformat', '-C', *layout, '-T', str(sectors), '-v', label, '-N', '53484e47', '-i', image, '::'], env=env, capture=True)
+     for entry in sorted(stage.iterdir()):
+         run(['mcopy', '-i', image, '-s', '-Q', '-m', entry, '::/'], env=env, capture=True)
+ 

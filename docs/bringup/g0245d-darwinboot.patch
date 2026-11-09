@@ -1,0 +1,508 @@
+diff --git a/DarwinBootPkg/Driver/BootVideo.h b/DarwinBootPkg/Driver/BootVideo.h
+index 2bbb634..4a6506c 100644
+--- a/DarwinBootPkg/Driver/BootVideo.h
++++ b/DarwinBootPkg/Driver/BootVideo.h
+@@ -13,13 +13,24 @@ DarwinBootVideoFromGop (CONST EFI_GRAPHICS_OUTPUT_PROTOCOL *Gop, UINT64 Video[6]
+   EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *Info;
+   UINT64 RowBytes;
+   UINT64 Bytes;
++  UINT64 Bpp;
+ 
+   ZeroMem (Video, 6 * sizeof (*Video));
+   if ((Gop->Mode == NULL) || (Gop->Mode->Info == NULL) ||
+       (Gop->Mode->SizeOfInfo < sizeof (*Info))) { return EFI_COMPROMISED_DATA; }
+   Info = Gop->Mode->Info;
+-  if (Info->PixelFormat != PixelBlueGreenRedReserved8BitPerColor) { return EFI_UNSUPPORTED; }
+-  RowBytes = (UINT64)Info->PixelsPerScanLine * 4;
++  //
++  // g0245d: this used to insist on PixelBlueGreenRedReserved8BitPerColor, which
++  // g0245d's 24bpp RGB888 panel never reports (SimpleFb hands out PixelBitMask).
++  // The arm64 kernel in this tree does not read boot_args->Video at all, and the
++  // only in-tree consumer is the hand-off bar, so describe whatever geometry the
++  // GOP has instead of refusing it. Depth comes from the buffer geometry:
++  // 0x5EEC00 / (1080 * 1920) = 3 here, 4 on a BGRA scanout.
++  //
++  Bpp = (UINT64)Gop->Mode->FrameBufferSize /
++        ((UINT64)Info->PixelsPerScanLine * Info->VerticalResolution);
++  if ((Bpp != 3) && (Bpp != 4)) { Bpp = 4; }
++  RowBytes = (UINT64)Info->PixelsPerScanLine * Bpp;
+   if ((Info->HorizontalResolution == 0) || (Info->VerticalResolution == 0) ||
+       (Info->PixelsPerScanLine < Info->HorizontalResolution) ||
+       (Info->VerticalResolution > MAX_UINT64 / RowBytes)) { return EFI_COMPROMISED_DATA; }
+@@ -32,7 +43,7 @@ DarwinBootVideoFromGop (CONST EFI_GRAPHICS_OUTPUT_PROTOCOL *Gop, UINT64 Video[6]
+   Video[2] = RowBytes;
+   Video[3] = Info->HorizontalResolution;
+   Video[4] = Info->VerticalResolution;
+-  Video[5] = 32;
++  Video[5] = Bpp * 8;
+   return EFI_SUCCESS;
+ }
+ 
+diff --git a/DarwinBootPkg/Driver/DarwinBoot.c b/DarwinBootPkg/Driver/DarwinBoot.c
+index 3b6cafc..c3993a9 100644
+--- a/DarwinBootPkg/Driver/DarwinBoot.c
++++ b/DarwinBootPkg/Driver/DarwinBoot.c
+@@ -6,6 +6,7 @@
+ #include <Library/DebugLib.h>
+ #include <Library/MemoryAllocationLib.h>
+ #include <Library/UefiBootServicesTableLib.h>
++#include <Library/UefiRuntimeServicesTableLib.h>
+ #include <Library/PrintLib.h>
+ #include <Library/UefiLib.h>
+ #include <Protocol/UniXNULoader.h>
+@@ -130,7 +131,16 @@ ParseKernelHeader (CONST UINT8 *Data, UINTN Size, UINTN Header, KERNEL *Kernel)
+        ((U32 (Data + Header + 8) & 0x00ffffff) != 2)) ||
+       ((U32 (Data + Header + 12) != 2) &&
+        ((Header != 0) || (U32 (Data + Header + 12) != 12)))) {
+-    return EFI_UNSUPPORTED;
++    //
++    // Reported as a load error, not "unsupported": the boot menu shows the
++    // status name and this means "the file is not a usable kernel", which is a
++    // different problem from a rejected hand-off.
++    //
++    DEBUG ((DEBUG_ERROR, "DARWINBOOT: reject: not an arm64 Mach-O kernel (magic 0x%x cputype 0x%x filetype %u)\n",
++            (Header + 4 <= Size) ? U32 (Data + Header) : 0,
++            (Header + 8 <= Size) ? U32 (Data + Header + 4) : 0,
++            (Header + 16 <= Size) ? U32 (Data + Header + 12) : 0));
++    return EFI_LOAD_ERROR;
+   }
+   if (U32 (Data + Header + 20) > Size - Header - 32) { return EFI_LOAD_ERROR; }
+   ZeroMem (Kernel, sizeof (*Kernel));
+@@ -446,41 +456,105 @@ RunEnd (EFI_MEMORY_DESCRIPTOR *Map, UINTN Size, UINTN Stride, UINT64 Start, UINT
+ #include "DiagFont.h"
+ STATIC CONST UINT64 mDiagFont[] = GLYPH_FONT;
+ 
++//
++// g0245d: the only evidence that survives ExitBootServices. Boot services are
++// gone, so this is raw memory work only. A green band means the kernel branch is
++// next; a red band means ExitBootServices itself failed and the loader is about to
++// spin. Both screen edges are painted because SimpleFbDxe scans the buffer
++// bottom-up (mFbFlip) and the GOP protocol does not expose that flag.
++//
++STATIC
++VOID
++PaintBand (IN CONST UINT64 Video[6], IN BOOLEAN Red)
++{
++  UINT8  *Fb;
++  UINTN  Bpp, Stride, Width, Height, Rows, Row, Col, Mirror;
++  UINT8  Pattern[4];
++
++  if ((Video[0] == 0) || (Video[2] == 0) || (Video[3] == 0) || (Video[4] == 0)) { return; }
++  Bpp    = (UINTN)(Video[5] / 8);
++  Stride = (UINTN)Video[2];
++  Width  = (UINTN)Video[3];
++  Height = (UINTN)Video[4];
++  if ((Bpp != 3) && (Bpp != 4)) { return; }
++
++  if (Bpp == 3) {
++    // g0245d's panel stores (G, R, B) per pixel.
++    Pattern[0] = Red ? 0x00 : 0xFF;
++    Pattern[1] = Red ? 0xFF : 0x00;
++    Pattern[2] = 0x00;
++    Pattern[3] = 0x00;
++  } else {
++    // B, G, R, reserved
++    Pattern[0] = 0x00;
++    Pattern[1] = Red ? 0x00 : 0xFF;
++    Pattern[2] = Red ? 0xFF : 0x00;
++    Pattern[3] = 0x00;
++  }
++
++  Fb   = (UINT8 *)(UINTN)Video[0];
++  Rows = Height / 24 + 1;
++  for (Row = 0; Row < Rows; Row++) {
++    for (Col = 0; Col < Width; Col++) {
++      CopyMem (Fb + Row * Stride + Col * Bpp, Pattern, Bpp);
++      Mirror = Height - 1 - Row;
++      CopyMem (Fb + Mirror * Stride + Col * Bpp, Pattern, Bpp);
++    }
++  }
++}
++
+ STATIC
+ VOID
+ DiagDraw (CONST CHAR16 *Text, UINTN Row)
+ {
+-  EFI_GRAPHICS_OUTPUT_PROTOCOL *Gop;
+-  UINT64                       Video[6];
+-  UINTN                        Scale = 4, X = 0, Y, Index, Gx, Gy, Dx, Dy, Cell, Line;
+-  UINT32                       *Fb;
+-  UINT64                       Glyph, Data;
+-  CHAR16                       Ch;
++  EFI_GRAPHICS_OUTPUT_PROTOCOL          *Gop;
++  EFI_GRAPHICS_OUTPUT_MODE_INFORMATION  *Info;
++  EFI_GRAPHICS_OUTPUT_BLT_PIXEL         *Buffer;
++  EFI_GRAPHICS_OUTPUT_BLT_PIXEL         White;
++  UINTN                                 Scale = 4, X = 0, Y, Index, Gx, Gy, Dx, Dy, Cell, Line;
++  UINTN                                 Width, Height, Length, Offset;
++  UINT64                                Glyph, Data;
++  CHAR16                                Ch;
+ 
+   if (EFI_ERROR (gBS->LocateProtocol (&gEfiGraphicsOutputProtocolGuid, NULL, (VOID **)&Gop)) ||
+-      EFI_ERROR (DarwinBootVideoFromGop (Gop, Video))) { return; }
+-  Cell = 6 * Scale;
+-  Line = 14 * Scale;
+-  Y = Video[4] / 4 + Row * Line;
+-  Fb = (UINT32 *)(UINTN)Video[0];
+-  for (Index = 0; Text[Index] != 0; Index++) {
++      (Gop->Mode == NULL) || (Gop->Mode->Info == NULL) || (Gop->Blt == NULL)) { return; }
++
++  Info = Gop->Mode->Info;
++  Width  = Info->HorizontalResolution;
++  Height = Info->VerticalResolution;
++  if ((Width == 0) || (Height == 0)) { return; }
++
++  Cell   = 6 * Scale;
++  Line   = 14 * Scale;
++  Length = StrLen (Text);
++  if ((Length == 0) || (Length * Cell > Width)) { return; }
++
++  //
++  // g0245d: this used to poke 32bpp BGRA words straight into FrameBufferBase and
++  // bail out when DarwinBootVideoFromGop() rejected the panel. Two things were
++  // wrong on the device: the panel is 24bpp (that check answered EFI_UNSUPPORTED,
++  // so nothing was ever drawn -- v116's countdown included), and SimpleFbDxe runs
++  // with mFbFlip = TRUE because the panel scans the buffer bottom-up, so raw
++  // writes come out upside down. Rendering into a BLT buffer and going through
++  // Gop->Blt fixes both: the driver owns depth conversion and the row flip.
++  //
++  Buffer = AllocateZeroPool (Length * Cell * Line * sizeof (*Buffer));
++  if (Buffer == NULL) { return; }
++
++  White.Blue = 0xFF; White.Green = 0xFF; White.Red = 0xFF; White.Reserved = 0;
++
++  for (Index = 0; Index < Length; Index++) {
+     Ch = Text[Index];
+-    if ((Ch < 32) || (Ch > 126)) { continue; }
+-    if (X + Cell > Video[3]) { X = 0; Y += Line; }
+-    if (Y + Line > Video[4]) { return; }
++    if ((Ch < 32) || (Ch > 126)) { X += Cell; continue; }
+     Glyph = mDiagFont[Ch - 32];
+-    for (Gy = 0; Gy < 14 * Scale; Gy++) {
+-      for (Gx = 0; Gx < Cell; Gx++) {
+-        Fb[(Y + Gy) * (Video[2] / 4) + X + Gx] = 0xFF000000;
+-      }
+-    }
+     for (Gy = 0; Gy < 12; Gy++) {
+       Data = (Gy < 6) ? ((Glyph >> 32) >> (Gy * 5)) : ((Glyph & 0xFFFFFFFFULL) >> ((Gy - 6) * 5));
+       for (Gx = 0; Gx < 5; Gx++) {
+         if ((Data >> Gx) & 1) {
+           for (Dy = 0; Dy < Scale; Dy++) {
+             for (Dx = 0; Dx < Scale; Dx++) {
+-              Fb[(Y + Gy * Scale + Dy) * (Video[2] / 4) + X + Gx * Scale + Dx] = 0xFFFFFFFF;
++              Offset = (Gy * Scale + Dy) * (Length * Cell) + X + Gx * Scale + Dx;
++              Buffer[Offset] = White;
+             }
+           }
+         }
+@@ -488,11 +562,52 @@ DiagDraw (CONST CHAR16 *Text, UINTN Row)
+     }
+     X += Cell;
+   }
++
++  Y = Height / 4 + Row * Line;
++  if (Y + Line > Height) { FreePool (Buffer); return; }
++  Gop->Blt (Gop, Buffer, EfiBltBufferToVideo, 0, 0, 0, Y, Length * Cell, Line, 0);
++  FreePool (Buffer);
++}
++
++//
++// g0245d: the boot menu can only show a status name, and everything this driver
++// Prints is painted over when the menu comes back. Park the last failure text in
++// a variable so UniXNU can echo it on the notice line; the loader protocol GUID
++// doubles as the vendor GUID because both modules already have it.
++//
++STATIC BOOLEAN  mDiagSet = FALSE;
++
++STATIC
++VOID
++RecordDiag (IN CONST CHAR16 *Text)
++{
++  //
++  // First message of the attempt wins: the specific one from AllocateWindow is
++  // worth more than the generic "boot refused" at the Fail label.
++  //
++  if (mDiagSet) { return; }
++
++  gRT->SetVariable (
++         L"UniXNUBootDiag",
++         &gUniXNULoaderProtocolGuid,
++         EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS,
++         (StrLen (Text) + 1) * sizeof (CHAR16),
++         (VOID *)Text
++         );
++  mDiagSet = TRUE;
++}
++
++STATIC
++VOID
++ClearDiag (VOID)
++{
++  mDiagSet = FALSE;
++  gRT->SetVariable (L"UniXNUBootDiag", &gUniXNULoaderProtocolGuid, 0, 0, NULL);
+ }
+ 
+ STATIC
+ EFI_STATUS
+-AllocateWindow (KERNEL *Kernel, UINT64 WindowSize, EFI_PHYSICAL_ADDRESS *Address)
++AllocateWindow (KERNEL *Kernel, UINT64 *WindowSize, EFI_PHYSICAL_ADDRESS *Address)
+ {
+   EFI_MEMORY_DESCRIPTOR *Map;
+   EFI_MEMORY_DESCRIPTOR *Descriptor;
+@@ -507,6 +622,10 @@ AllocateWindow (KERNEL *Kernel, UINT64 WindowSize, EFI_PHYSICAL_ADDRESS *Address
+   UINT64                BestStart;
+   UINT64                BestBytes;
+   UINT64                RunBytes;
++  UINT64                Try;
++  UINT64                Floor;
++  UINT64                Usable;
++  UINT64                BestUsable;
+ 
+   *Address = 0;
+   Map = NULL;
+@@ -515,24 +634,74 @@ AllocateWindow (KERNEL *Kernel, UINT64 WindowSize, EFI_PHYSICAL_ADDRESS *Address
+   BestBytes = 0;
+   Status = GetMap (&Map, &Capacity, &Size, &Key, &Stride);
+   if (EFI_ERROR (Status)) { if (Map != NULL) { FreePool (Map); } return Status; }
+-  Status = EFI_OUT_OF_RESOURCES;
+-  for (Offset = 0; Offset + Stride <= Size; Offset += Stride) {
+-    Descriptor = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)Map + Offset);
+-    if ((Descriptor->Type != EfiConventionalMemory) || (Descriptor->NumberOfPages == 0)) { continue; }
+-    End = RunEnd (Map, Size, Stride, Descriptor->PhysicalStart,
+-                  Descriptor->PhysicalStart + EFI_PAGES_TO_SIZE (Descriptor->NumberOfPages));
+-    RunBytes = End - Descriptor->PhysicalStart;
+-    if (RunBytes > BestBytes) { BestBytes = RunBytes; BestStart = Descriptor->PhysicalStart; }
+-    Candidate = ALIGN_VALUE (Descriptor->PhysicalStart, BLOCK_SIZE) + (Kernel->Base & (BLOCK_SIZE - 1));
+-    if ((Candidate < Descriptor->PhysicalStart) || (End < Candidate) || (End - Candidate < WindowSize)) { continue; }
+-    Status = gBS->AllocatePages (AllocateAddress, EfiLoaderCode, EFI_SIZE_TO_PAGES (WindowSize), &Candidate);
+-    if (!EFI_ERROR (Status)) { *Address = Candidate; break; }
++
++  //
++  // g0245d: one 256 MiB contiguous EfiConventionalMemory run is not something a
++  // phone firmware map offers -- the payload volume, the FV and the DXE heap are
++  // scattered through the first gigabytes -- and v113 answered EFI_OUT_OF_RESOURCES
++  // straight away. The window only has to hold the kernel, boot args, the tree and
++  // the kexts copied next to it, so a smaller run is a perfectly good answer.
++  //
++  // v115: the biggest run on the device is 0x3B38000 (59.1 MiB) while the request
++  // was 64 MiB, so "halve from 256" alone was not enough: the smallest step was
++  // still above what the map has. Now each failed pass also clamps the request to
++  // whatever the biggest run can actually hold, which converges in one step.
++  //
++  Floor = ALIGN_VALUE ((Kernel->End - Kernel->Base) + SIZE_16MB, BLOCK_SIZE);
++  if (Floor < SIZE_32MB) { Floor = SIZE_32MB; }
++  Try = *WindowSize;
++  if (Try < Floor) { Try = Floor; }
++  if (Try & (BLOCK_SIZE - 1)) { Try = ALIGN_VALUE (Try, BLOCK_SIZE); }
++
++  for ( ; ;) {
++    Status = EFI_OUT_OF_RESOURCES;
++    BestStart = 0;
++    BestBytes = 0;
++    BestUsable = 0;
++    for (Offset = 0; Offset + Stride <= Size; Offset += Stride) {
++      Descriptor = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)Map + Offset);
++      if ((Descriptor->Type != EfiConventionalMemory) || (Descriptor->NumberOfPages == 0)) { continue; }
++      End = RunEnd (Map, Size, Stride, Descriptor->PhysicalStart,
++                    Descriptor->PhysicalStart + EFI_PAGES_TO_SIZE (Descriptor->NumberOfPages));
++      RunBytes = End - Descriptor->PhysicalStart;
++      if (RunBytes > BestBytes) { BestBytes = RunBytes; BestStart = Descriptor->PhysicalStart; }
++      Candidate = ALIGN_VALUE (Descriptor->PhysicalStart, BLOCK_SIZE) + (Kernel->Base & (BLOCK_SIZE - 1));
++      if ((Candidate < Descriptor->PhysicalStart) || (End < Candidate)) { continue; }
++      Usable = (End - Candidate) & ~(BLOCK_SIZE - 1);
++      if (Usable > BestUsable) { BestUsable = Usable; }
++      if (End - Candidate < Try) { continue; }
++      Status = gBS->AllocatePages (AllocateAddress, EfiLoaderCode, EFI_SIZE_TO_PAGES (Try), &Candidate);
++      if (!EFI_ERROR (Status)) { *Address = Candidate; break; }
++    }
++
++    if (!EFI_ERROR (Status)) {
++      if (Try != *WindowSize) {
++        Print (L"DARWINBOOT: window %lu -> %lu bytes (map fragmented)\n",
++               (UINT64)*WindowSize, (UINT64)Try);
++        DEBUG ((DEBUG_ERROR, "DARWINBOOT: window %lu -> %lu bytes (map fragmented)\n",
++                (UINT64)*WindowSize, (UINT64)Try));
++      }
++      *WindowSize = Try;
++      break;
++    }
++
++    //
++    // Shrink to what the map can host, then halve if even that is above the floor.
++    //
++    if ((BestUsable >= Floor) && (BestUsable < Try)) { Try = BestUsable; continue; }
++    if (Try <= Floor) { break; }
++    Try = (Try / 2) & ~(BLOCK_SIZE - 1);
++    if (Try < Floor) { Try = Floor; }
+   }
++
+   if (EFI_ERROR (Status)) {
+     CHAR16 Line[96];
+     UINTN  Row = 1;
+-    UnicodeSPrint (Line, sizeof (Line), L"NO WINDOW %lx BIG RUN %lx @ %lx", WindowSize, BestBytes, BestStart);
++    UnicodeSPrint (Line, sizeof (Line), L"NO WINDOW %lx BIG RUN %lx @ %lx", Try, BestBytes, BestStart);
+     DiagDraw (Line, 0);
++    DEBUG ((DEBUG_ERROR, "DARWINBOOT: no window: want %lu biggest run %lu at 0x%lx\n",
++            (UINT64)Try, (UINT64)BestBytes, (UINT64)BestStart));
++    RecordDiag (Line);
+     for (Offset = 0; Offset + Stride <= Size; Offset += Stride) {
+       Descriptor = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)Map + Offset);
+       if ((Descriptor->Type == EfiConventionalMemory) && (Descriptor->NumberOfPages >= 0x400) && (Row < 8)) {
+@@ -602,9 +771,27 @@ Boot (
+ 
+   (VOID)This;
+   if ((Request == NULL) || (Request->Volume == NULL) || (Request->KernelPath == NULL)) { return EFI_INVALID_PARAMETER; }
+-  if ((Request->KextCount != 0) || (Request->DeviceTree != NULL) || (Request->DeviceTreeSize != 0) ||
+-      (DarwinCurrentEl () != 4)) {
+-    Print (L"DARWINBOOT: unsupported inputs or exception level; firmware retained\n");
++  ClearDiag ();
++  //
++  // One rejection per reason, each with its own status code: the boot menu can
++  // only show the status name, and v110/v111 answered everything with
++  // "Unsupported", which hid which gate had fired.
++  //
++  if (Request->KextCount != 0) {
++    Print (L"DARWINBOOT: kexts not accepted, %lu staged\n", (UINT64)Request->KextCount);
++    DEBUG ((DEBUG_ERROR, "DARWINBOOT: reject: %lu staged kext(s)\n", (UINT64)Request->KextCount));
++    return EFI_INVALID_PARAMETER;
++  }
++  if ((Request->DeviceTree != NULL) || (Request->DeviceTreeSize != 0)) {
++    Print (L"DARWINBOOT: caller-supplied tree rejected, %lu bytes\n", (UINT64)Request->DeviceTreeSize);
++    DEBUG ((DEBUG_ERROR, "DARWINBOOT: reject: caller DT 0x%lx, %lu bytes\n",
++            (UINT64)(UINTN)Request->DeviceTree, (UINT64)Request->DeviceTreeSize));
++    return EFI_ACCESS_DENIED;
++  }
++  if (DarwinCurrentEl () != 4) {
++    Print (L"DARWINBOOT: needs EL1, firmware runs at EL%u\n", (UINT32)(DarwinCurrentEl () >> 2));
++    DEBUG ((DEBUG_ERROR, "DARWINBOOT: reject: firmware at EL%u, kernel needs EL1\n",
++            (UINT32)(DarwinCurrentEl () >> 2)));
+     return EFI_UNSUPPORTED;
+   }
+   if (!RamdiskLayout (Request->Ramdisk, Request->RamdiskSize, &RamdiskExpandedSize, &RamdiskPacked)) {
+@@ -663,7 +850,8 @@ Boot (
+     if ((RamdiskOffset == MAX_UINTN) || (U64 ((UINT8 *)Tree + RamdiskOffset) != 0) ||
+         (U64 ((UINT8 *)Tree + RamdiskOffset + 8) != 0)) { Status = EFI_COMPROMISED_DATA; goto Fail; }
+   } else if (RamdiskOffset != MAX_UINTN) {
+-    Status = EFI_UNSUPPORTED;
++    DEBUG ((DEBUG_ERROR, "DARWINBOOT: reject: ADT declares a RAMDisk slot but no ramdisk was supplied\n"));
++    Status = EFI_ABORTED;
+     goto Fail;
+   }
+   CopyMem (TreePath, Request->KernelPath, Length);
+@@ -718,8 +906,22 @@ Boot (
+     goto Fail;
+   }
+   Status = ReadBootVideo (Video);
+-  if (EFI_ERROR (Status)) { goto Fail; }
+-  Status = AllocateWindow (&Kernel, WindowSize, &Address);
++  if (EFI_ERROR (Status)) {
++    //
++    // v113: not fatal. The arm64 kernel in this tree never reads
++    // boot_args->Video -- osfmk/console/video_console.c is only wired up from
++    // pexpert/i386 and pexpert/arm, and pexpert/arm64 never touches
++    // PE_state.video -- so a panel that is not 32bpp BGRA must not stop the
++    // hand-off. g0245d's panel is 24bpp RGB888 (frame buffer 1080x1920x3), the
++    // GOP reports it as PixelBitMask, and the strict BGRA check used to answer
++    // EFI_UNSUPPORTED: that was the last "returned: Unsupported" on the menu.
++    //
++    DEBUG ((DEBUG_ERROR, "DARWINBOOT: GOP not usable (%r), hand-off without video\n", Status));
++    Print (L"DARWINBOOT: no 32bpp GOP (%r), hand-off without video\n", Status);
++    ZeroMem (Video, 6 * sizeof (*Video));
++    Status = EFI_SUCCESS;
++  }
++  Status = AllocateWindow (&Kernel, &WindowSize, &Address);
+   if (EFI_ERROR (Status)) { goto Fail; }
+   ArgsAddress = ALIGN_VALUE (Address + Kernel.End - Kernel.Base, SIZE_16KB);
+   TreeAddress = ArgsAddress + EFI_PAGE_SIZE;
+@@ -809,6 +1011,32 @@ Boot (
+           READ_SYSREG (id_aa64mmfr0_el1) & 0xF, (((READ_SYSREG (id_aa64mmfr0_el1) >> 28) & 0xF) == 0xF) ? "NOT supported" : "supported"));
+   DEBUG ((DEBUG_ERROR, "ID_AA64PFR0_EL1  0x%lx\n", READ_SYSREG (id_aa64pfr0_el1)));
+   DEBUG ((DEBUG_ERROR, "\nExiting boot services. A green bar across the top\nmarks the loader handoff before the kernel branch.\n"));
++
++  //
++  // g0245d: hold the screen. The console lines above are small, the kernel has no
++  // framebuffer console in this tree, and a reset wipes everything -- without a
++  // pause the only evidence of a hand-off is gone before a camera can catch it.
++  //
++  {
++    CHAR16 Line[96];
++    UINTN  Second;
++
++    UnicodeSPrint (Line, sizeof (Line), L"WINDOW 0x%lx  ENTRY PA 0x%lx",
++                   (UINT64)WindowSize, Address + Kernel.Entry - Kernel.Base);
++    DiagDraw (Line, 0);
++    UnicodeSPrint (Line, sizeof (Line), L"ARGS 0x%lx  DT 0x%lx + 0x%lx",
++                   ArgsAddress, TreeAddress, (UINT64)TreeSize);
++    DiagDraw (Line, 1);
++    UnicodeSPrint (Line, sizeof (Line), L"KERNEL VA 0x%lx  END 0x%lx", Kernel.Base, Kernel.End);
++    DiagDraw (Line, 2);
++    for (Second = 12; Second > 0; Second--) {
++      UnicodeSPrint (Line, sizeof (Line), L"%lu  HANDOFF IN %lu s - PHOTO NOW",
++                     (UINT64)(13 - Second), (UINT64)Second);
++      DiagDraw (Line, 3);
++      gBS->Stall (1000 * 1000);
++    }
++  }
++
+   for (Attempt = 0; Attempt < 3; Attempt++) {
+     MapSize = Capacity;
+     Status = gBS->GetMemoryMap (&MapSize, Map, &Key, &Stride, &Version);
+@@ -818,10 +1046,19 @@ Boot (
+     }
+     Status = gBS->ExitBootServices (mImage, Key);
+     if (!EFI_ERROR (Status)) {
++      PaintBand (Video, FALSE);
+       DarwinEnter (ArgsAddress, Address + Kernel.Entry - Kernel.Base, Address, WindowSize, Video[0], Video[2] * Video[4]);
+       CpuDeadLoop ();
+     }
+-    if (Status != EFI_INVALID_PARAMETER) { CpuDeadLoop (); }
++    if (Status != EFI_INVALID_PARAMETER) {
++      PaintBand (Video, TRUE);
++      {
++        CHAR16 Diag[96];
++        UnicodeSPrint (Diag, sizeof (Diag), L"ExitBootServices failed: %r", Status);
++        RecordDiag (Diag);
++      }
++      CpuDeadLoop ();
++    }
+   }
+   CpuDeadLoop ();
+   return EFI_ABORTED;
+@@ -836,6 +1073,12 @@ Fail:
+   if (Map != NULL) { FreePool (Map); }
+   if (Address != 0) { gBS->FreePages (Address, EFI_SIZE_TO_PAGES (WindowSize)); }
+   Print (L"DARWINBOOT: boot refused: %r; firmware retained\n", Status);
++  {
++    CHAR16 Diag[96];
++    UnicodeSPrint (Diag, sizeof (Diag), L"boot refused: %r", Status);
++    RecordDiag (Diag);
++  }
++
+   return Status;
+ }
+ 
+@@ -867,6 +1110,12 @@ DarwinBootEntry (EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
+   if (!EFI_ERROR (Status)) {
+     Loaded->Unload = Unload;
+     Print (L"DARWINBOOT: loader v2 installed EL%u\n", (UINT32)(DarwinCurrentEl () >> 2));
++    //
++    // Also goes to the Advanced Logger, so the exception level survives even
++    // when the boot menu has already painted over this line.
++    //
++    DEBUG ((DEBUG_ERROR, "DARWINBOOT: loader v2 installed, firmware at EL%u\n",
++            (UINT32)(DarwinCurrentEl () >> 2)));
+   }
+   return Status;
+ }
+diff --git a/DarwinBootPkg/Driver/DarwinBoot.inf b/DarwinBootPkg/Driver/DarwinBoot.inf
+index 3a90c96..e46e341 100644
+--- a/DarwinBootPkg/Driver/DarwinBoot.inf
++++ b/DarwinBootPkg/Driver/DarwinBoot.inf
+@@ -28,6 +28,7 @@
+   UefiBootServicesTableLib
+   UefiDriverEntryPoint
+   UefiLib
++  UefiRuntimeServicesTableLib
+ 
+ [Protocols]
+   gUniXNULoaderProtocolGuid ## PRODUCES
