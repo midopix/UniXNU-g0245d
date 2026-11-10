@@ -1,13 +1,24 @@
-# 推送状态（2026-11-09 19:05 全部完成）
+# 推送状态（2026-11-10 19:06 全部完成）
 
-四个目标全部推送成功，SHA 已用 `git ls-remote` 独立回验。
+四个目标全部推送成功，`bash workspace/github/push-now.sh` 打印 `ALL PASS`，SHA 已用 `git ls-remote` 逐个独立回验。
 
-| 目标 | 分支 | 远端 SHA | 内容 |
+| 目标 | 分支 | 远端 SHA | 本次（11-10）增量 |
 |---|---|---|---|
-| `midopix/UniXNU-g0245d` | `main` | `00df1ab` | payload 24 MiB、`patches/xnu/zzz-g0245d-early-boot-marks.patch`、`docs/bringup/` 交接文档与参考补丁 |
-| `midopix/uefi-g0245d` | `main` | `5cc6839` | `EnglishDxe`（DSC+FDF）、PMIC 按键 DTEST 修复、Msm8996 寄存器定义 |
-| `midopix/UniXNU`（fork） | `device/g0245d-msm8996` | `d95509d` | payload FAT32 簇数判断、`rotate=0` 语义、不转发固件 DT、notice 带原因、DarwinBoot 指针 |
-| `midopix/DarwinBoot`（fork，本次新建） | `g0245d-bringup` | `a7b2e17` | 窗口自适应、24bpp `DiagDraw`（走 `Gop->Blt`）、交接前大字停留、绿/红判定带、诊断变量 |
+| `midopix/UniXNU-g0245d` | `main` | `d7fef62` | v122..v128 帧缓冲画带诊断补丁、`patches/xnu/series` 更正 |
+| `midopix/uefi-g0245d` | `main` | `5cc6839` | 无变化 |
+| `midopix/UniXNU`（fork） | `device/g0245d-msm8996` | `32207c4` | `scripts/prepare-xnu-source.py` 离线头文件 blob 校验缓存 |
+| `midopix/DarwinBoot`（fork） | `g0245d-bringup` | `a7b2e17` | 无变化 |
+
+注：表中 SHA 指本轮功能提交。设备仓在此之后还有一个只更新本文件的 docs 提交，远端 HEAD 会比 `d7fef62` 新一个提交；其余三个目标没有新增提交。
+
+累计内容（11-09 及更早）：设备仓 payload 24 MiB、`zzz-g0245d-early-boot-marks.patch`、`docs/bringup/` 交接文档与参考补丁；UEFI 仓 `EnglishDxe`（DSC+FDF）、PMIC 按键 DTEST 修复、Msm8996 寄存器定义；UniXNU fork payload FAT32 簇数判断、`rotate=0` 语义、不转发固件 DT、notice 带原因、DarwinBoot 指针；DarwinBoot fork 窗口自适应、24bpp `DiagDraw`（走 `Gop->Blt`）、交接前大字停留、绿/红判定带。
+
+## 本次本地提交
+
+- `d7fef62`「xnu: add v122-v128 framebuffer stage patches for early boot hang」：8 文件、+924 行。诊断链把死点收窄到 `arm_init()`：`lr` 保存/恢复、rebase-safe 立即数、Apple 寄存器排除、可见区重映射、`arm_vm_init` 页表边界细分。v127 实拍 K=0（第三组全暗、主带与细分带仍亮）确认内核没走完 `arm_init()`。
+- `32207c4`「scripts: restore XNU headers from a blob-verified offline cache」：+25/−1。重新 clone 时优先用 `.cache/sources/headers` 的 git blob SHA 校验副本，改 series 后不再依赖 GitHub 拉取 26 个头文件。
+
+未上传（本机产物，不属于仓库边界）：`workspace/tmp/g0245d-v12*.img`、构建日志、实拍照片/视频、`out/`、`.cache/`、`local-src/`、`wait-flash-*.sh`（含设备序列号）、`.lock`，以及 `workspace/tools/` 下与剪贴板路径耦合的照片判读脚本。
 
 - 设备仓：https://github.com/midopix/UniXNU-g0245d
 - UEFI overlay：https://github.com/midopix/uefi-g0245d
