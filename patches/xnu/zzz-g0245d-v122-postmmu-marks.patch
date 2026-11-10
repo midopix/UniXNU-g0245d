@@ -1,0 +1,116 @@
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -116,6 +116,65 @@
+ 9:
+ .endm
+ 
++	/*
++	 * g0245d v122: post-MMU framebuffer paint infra.
++	 *
++	 * The 6 pre-MMU BOOT_MARK bands only prove the kernel reached the "about
++	 * to enable MMU" point. Once SCTLR.M=1, raw PAs are meaningless, and the
++	 * panel PA (0x83401000) is not covered by the V=P bootstrap map (that map
++	 * starts at the kernel base, above 0x83401000). So we (a) install a 1GB
++	 * block at L1 index 3 of the V=P table mapping VA 0xC0000000 -> PA
++	 * 0x80000000 (see common_start), giving VA 0xC3401000 -> PA 0x83401000,
++	 * and (b) paint bands through that mapped VA here.
++	 *
++	 * Band i = raw row 200 + 64*i, 32 rows tall, identical geometry to
++	 * BOOT_MARK so the two halves of the trace line up in a photo.
++	 */
++	.data
++	.align 3
++	.globl EXT(g0245d_fb_base)
++LEXT(g0245d_fb_base)
++	.quad	0xC3401000			// framebuffer mapped VA (bootstrap L1 idx 3 -> PA 0x83401000)
++	.globl EXT(g0245d_fb_rowbytes)
++LEXT(g0245d_fb_rowbytes)
++	.quad	3240				// 1080 px * 3 bytes (RGB888)
++
++	/*
++	 * g0245d_paint_stage(index): paint one solid white band at the mapped
++	 * framebuffer VA. Called only after the MMU is on. Clobbers x0-x5.
++	 */
++	.text
++	.align 2
++	.globl EXT(g0245d_paint_stage)
++LEXT(g0245d_paint_stage)
++	mov	x3, #200
++	mov	x4, #64
++	mul	x4, x0, x4			// x4 = 64 * index
++	add	x3, x3, x4			// x3 = 200 + 64*index (row)
++	adrp	x1, EXT(g0245d_fb_base)@page
++	add	x1, x1, EXT(g0245d_fb_base)@pageoff
++	ldr	x1, [x1]			// x1 = framebuffer mapped VA
++	cbz	x1, 9f
++	adrp	x2, EXT(g0245d_fb_rowbytes)@page
++	add	x2, x2, EXT(g0245d_fb_rowbytes)@pageoff
++	ldr	x2, [x2]			// x2 = row bytes
++	cbz	x2, 9f
++	mul	x3, x3, x2			// byte offset = row * rowbytes
++	add	x1, x1, x3			// pixel base VA
++	mov	x4, #32
++	mul	x4, x4, x2			// 32 rows * rowbytes
++	lsr	x4, x4, #2			// # of 4-byte words
++	mov	w5, #0xFFFFFFFF
++1:	str	w5, [x1], #4
++	subs	x4, x4, #1
++	b.ne	1b
++9:	ret
++
++.macro G0245D_PAINT index
++	mov	x0, #\index
++	bl	EXT(g0245d_paint_stage)
++.endm
++
+ /*
+  * Checks the reset handler for global and CPU-specific reset-assist functions,
+  * then jumps to the reset handler with boot args and cpu data. This is copied
+@@ -711,6 +770,18 @@
+ 	and		x0, x0, #(TTBR_BADDR_MASK)
+ 	MSR_TTBR1_EL1_X0
+ 
++	/* g0245d v122: map the firmware framebuffer as a 1GB block at L1 index 3
++	 * of the V=P (TTBR0) table. VA 0xC0000000 -> PA 0x80000000, so VA
++	 * 0xC3401000 resolves to PA 0x83401000. We cannot reuse the kernel
++	 * window's index 2 (which holds the kernel PA 0x95400000 and would be
++	 * clobbered by a 1GB block there). Device attributes so the write reaches
++	 * the panel instead of stalling in the cache. TTE = 0x8000060D
++	 * (PA 0x80000000 | VALID | SH(OUTER) | ATTR(DISABLE) | AF). */
++	add	x9, x25, #0x18			// L1 index 3 (3 * 8 bytes) in V=P table
++	MOV64	x0, 0x8000060D
++	str	x0, [x9]
++	dsb	ish
++
+ 	// g0245d: stage 4 - TTBR0/TTBR1 programmed.
+ 	BOOT_MARK x20, 4
+ 
+@@ -817,6 +888,10 @@
+ 	bne		.
+ #endif /* !VMAPPLE */
+ 
++	// g0245d v122: stage 6 - MMU is on and SCTLR readback passed. Paint via
++	// the mapped framebuffer VA to prove the MMU transition succeeded.
++	G0245D_PAINT 6
++
+ #if (!CONFIG_KERNEL_INTEGRITY || (CONFIG_KERNEL_INTEGRITY && !defined(KERNEL_INTEGRITY_WT)))
+ 	/* Watchtower
+ 	 *
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -353,6 +353,15 @@
+ 	DTEntry chosen = NULL;
+ 	unsigned int dt_entry_size = 0;
+ 
++	/*
++	 * g0245d v122: stage 7 - reached the C entry point (arm_init). Paint a
++	 * band through the post-MMU framebuffer mapping to prove the kernel got
++	 * this far. Self-contained: depends only on the bootstrap V=P table and
++	 * the g0245d_paint_stage symbol defined in start.s.
++	 */
++	extern void g0245d_paint_stage(int index);
++	g0245d_paint_stage(7);
++
+ 	arm_setup_pre_sign();
+ 
+ 	arm_slide_rebase_and_sign_image();

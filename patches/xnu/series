@@ -18,3 +18,90 @@ zzz-g0245d-linux-installfile-futimes.patch
 # This board has no serial console and the tree has no arm64 framebuffer console,
 # so counting the bands is the only way to see how far the kernel gets.
 zzz-g0245d-early-boot-marks.patch
+
+# G0245D v122 bring-up: post-MMU progress bands. Maps the firmware framebuffer as
+# a 1GB device block at L1 index 3 of the V=P (TTBR0) table (VA 0xC3401000 ->
+# PA 0x83401000, avoiding the kernel-window index-2 collision) and paints
+# stage 6 (MMU transition succeeded) from start.s plus stage 7 (entered
+# arm_init) from arm_init.c. [v122 hardware result: 7 bands, stage 7 never lit.]
+# The cause was NOT the Apple SoC register blocks: G0245D_PAINT used `bl`
+# without preserving lr, which holds the arm_init return address, so the final
+# `ret` looped inside common_start instead of entering C.
+zzz-g0245d-v122-postmmu-marks.patch
+
+# G0245D v123 bring-up: (1) protect lr in G0245D_PAINT with x19, matching XNU's
+# own set_nex_pg / set_mmu_ttb convention; (2) disable APPLY_TUNABLES and
+# CPU_OVRD, two Apple-private system-register blocks that are UNDEFINED on
+# MSM8996/Kryo; (3) add stage 8..12 sub-bands in a compact dark strip above the
+# main bands so one flash tells us exactly how far the kernel gets.
+# Read-out: stage 7 visible => entered arm_init (lr fix worked). If still stuck,
+# the last visible sub-band names the exact instruction group that faults.
+zzz-g0245d-v123-lr-fix-and-substages.patch
+
+# G0245D v124 bring-up: v123 hardware result = all 13 bands lit (main 0..7 +
+# sub 8..12), so stage 7 (arm_init entry) was reached and the lr fix worked.
+# (1) Make g0245d_paint_stage rebase-safe: v122/v123 loaded the framebuffer VA
+# and stride from .data via adrp+ldr, but arm_slide_rebase_and_sign_image()
+# rebases .data pointers, so every post-rebase band could silently write to a
+# slid, invalid VA. Load them as immediates instead.
+# (2) Add a third strip, index 13..21 (row 700 + 32*(i-13), 16 rows, pitch 32
+# deliberately distinct from 64/40 so the three groups separate by gap ratio),
+# and paint nine marks inside arm_init(): before/after slide+rebase+sign,
+# cpu_data_init, PE_init_platform(FALSE), before/after configure_misc_apple_regs,
+# thread_bootstrap, PE_init_printf, and just before machine_startup.
+# No functional changes: one patch series step verifies one hypothesis.
+zzz-g0245d-v124-arm-init-substages.patch
+
+# G0245D v125 bring-up: v124 hardware readout = main 8 + sub 5 + third-strip 4
+# bands, i.e. stage 13/14/15/16 lit and 17..21 dark. Stage 14 lit proves the
+# rebase-safe immediate-based paint helper works after slide+rebase+sign.
+# The fault sits between stage 16 (after PE_init_platform(FALSE)) and stage 17.
+# NOTE (verified in machine_routines_apple.c): on non-Apple builds
+# configure_misc_apple_boot_args / configure_misc_apple_regs /
+# configure_timer_apple_regs are EMPTY no-ops. The only calls here with real
+# code are wfe_timeout_configure() (divides by timebase_frequency_hz, computes
+# arm64_eventi) and wfe_timeout_init() -> _enable_timebase_event_stream(), which
+# mrs/msr CNTKCTL_EL1 and enables the event stream. So this is an elimination
+# experiment: skip the whole block and see whether stage 17 lights. If it does
+# not, the fault is NOT in these calls (look at PE_init_platform side effects /
+# pending interrupts / exception vectors instead) and v126 must add finer marks.
+# stage 17/18 marks are kept OUTSIDE the disabled blocks so the band geometry
+# and readout stay identical; stages 19/20/21 show how far past arm_init we get.
+zzz-g0245d-v125-disable-apple-regs.patch
+# v126: v125 photo showed all 9 third-strip bands (13..21) lit -> arm_init()
+# fully passed. Extend the SAME third strip (start.s index>=13 -> row 700+32*(i-13),
+# so 22..29 land at rows 988..1212 with no asm change) into machine_startup()
+# and kernel_bootstrap(): entries, scale_setup, vm_mem_bootstrap, console_init,
+# PMAP_ACTIVATE_KERNEL, clock_init. If 26+ go dark, distinguish "died in VM init"
+# from "bootstrap V=P framebuffer mapping lost after pmap rebuild" before v127.
+zzz-g0245d-v126-kernel-bootstrap-marks.patch
+# v127: v126 photo showed NO new bands above the third strip (新增区亮度
+# 82.0 vs v125 80.4, 白占比增量 -0.005) while the BootShim blue menu item
+# stayed intact -> rows 988..1212 are past this panel visible area (~960),
+# not necessarily a kernel hang. Remap the eight v126 call sites from index
+# 22..29 back to 13..20 (rows 700..924, proven visible by the v125 photo),
+# and delete arm_init stages 13..20. NOTE (2026-11-10, corrected by v127 photo):
+# "v125 already proved arm_init completes" was WRONG - the v125 "9 bands lit"
+# readout came from a bad template alignment; v125 actually stopped between
+# thread_bootstrap() and PE_init_printf(). v127's whole third strip came back
+# dark (lum 45 / white 0.031) while main+sub strips stayed lit, i.e. the
+# kernel never reaches arm_init()'s end. See v128.
+# stage 21 stays at row 956 as a self-check: if only it is lit, the kernel
+# really died entering machine_startup(); if N lower bands are lit it reached
+# stage 22+N-1 and v126 was only an off-screen geometry artefact.
+# start.s is untouched: zero asm risk.
+zzz-g0245d-v127-visible-strip-remap.patch
+# v128: v127 photo -> K=0 (third strip completely dark, clean low-luminance
+# dark region, NOT moire flattening: lum 45.2 / white 0.031 / contrast 6.3,
+# versus v126's flattened lum 147 / white 0.53 / contrast 10). Main strip 8
+# and sub strip 6 all lit -> paint() still works, arm_init() just never
+# finishes. So move all nine visible slots (index 13..21) back into the
+# thread_bootstrap() -> PE_init_printf() window as eight fine-grained marks
+# (machine_set_current_thread / cpu_bootstrap / kernel_startup_bootstrap /
+# processor_bootstrap / arm_vm_init PAGE-TABLE BOUNDARY / serial_init /
+# PE_create_console) plus the stage-21 self-check at arm_init()'s end.
+# Delete v127's eight remapped calls in machine_startup()/kernel_bootstrap():
+# the kernel provably never reaches them and they would repaint the same rows.
+# K lit bands = last sub-stage reached (1..8), K=9 means arm_init() completed.
+# start.s untouched: index>=13 still row=700+32*(index-13).
+zzz-g0245d-v128-arm-init-substages.patch
