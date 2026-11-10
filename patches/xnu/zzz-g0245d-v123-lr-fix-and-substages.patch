@@ -1,0 +1,121 @@
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -141,16 +141,31 @@
+ 
+ 	/*
+ 	 * g0245d_paint_stage(index): paint one solid white band at the mapped
+-	 * framebuffer VA. Called only after the MMU is on. Clobbers x0-x5.
++	 * framebuffer VA. Called only after the MMU is on. Clobbers x0-x6.
+ 	 */
+ 	.text
+ 	.align 2
+ 	.globl EXT(g0245d_paint_stage)
+ LEXT(g0245d_paint_stage)
+-	mov	x3, #200
++	cmp	x0, #8
++	b.lt	2f
++	/* g0245d v123: sub-stages (index 8..12) use a compact geometry in the
++	 * dark strip ABOVE the main bands: row = 8 + 40*(index-8), 24 rows
++	 * tall. Rows >= 700 fall off the visible panel / into the bright desk
++	 * area of the photo, so they cannot be used for extra marks. */
++	sub	x0, x0, #8
++	mov	x3, #8
++	mov	x4, #40
++	mul	x4, x0, x4
++	add	x3, x3, x4
++	mov	x6, #24
++	b	3f
++2:	mov	x3, #200
+ 	mov	x4, #64
+ 	mul	x4, x0, x4			// x4 = 64 * index
+ 	add	x3, x3, x4			// x3 = 200 + 64*index (row)
++	mov	x6, #32
++3:
+ 	adrp	x1, EXT(g0245d_fb_base)@page
+ 	add	x1, x1, EXT(g0245d_fb_base)@pageoff
+ 	ldr	x1, [x1]			// x1 = framebuffer mapped VA
+@@ -161,8 +176,8 @@
+ 	cbz	x2, 9f
+ 	mul	x3, x3, x2			// byte offset = row * rowbytes
+ 	add	x1, x1, x3			// pixel base VA
+-	mov	x4, #32
+-	mul	x4, x4, x2			// 32 rows * rowbytes
++	mov	x4, x6
++	mul	x4, x4, x2			// height rows * rowbytes
+ 	lsr	x4, x4, #2			// # of 4-byte words
+ 	mov	w5, #0xFFFFFFFF
+ 1:	str	w5, [x1], #4
+@@ -171,8 +186,15 @@
+ 9:	ret
+ 
+ .macro G0245D_PAINT index
++	/* g0245d v123: bl clobbers lr, which holds the arm_init return address
++	 * installed by start_first_cpu. XNU protects its own bl calls with x19
++	 * (set_nex_pg / set_mmu_ttb); v122 missed this, so after the stage-6
++	 * band the final ret jumped back into common_start -> the 7-band freeze
++	 * seen in the v122 footage. */
++	mov	x19, lr
+ 	mov	x0, #\index
+ 	bl	EXT(g0245d_paint_stage)
++	mov	lr, x19
+ .endm
+ 
+ /*
+@@ -891,6 +913,8 @@
+ 	// g0245d v122: stage 6 - MMU is on and SCTLR readback passed. Paint via
+ 	// the mapped framebuffer VA to prove the MMU transition succeeded.
+ 	G0245D_PAINT 6
++	// g0245d v123: stage 8 - lr was preserved, execution continued.
++	G0245D_PAINT 8
+ 
+ #if (!CONFIG_KERNEL_INTEGRITY || (CONFIG_KERNEL_INTEGRITY && !defined(KERNEL_INTEGRITY_WT)))
+ 	/* Watchtower
+@@ -914,24 +938,42 @@
+ 	msr		MDSCR_EL1, x12
+ 	// Initialization common to all non-virtual Apple targets
+ #endif  // APPLE_ARM64_ARCH_FAMILY
+-
+-
+-#if defined(APPLE_ARM64_ARCH_FAMILY)
++	// g0245d v123: stage 9 - survived MDSCR_EL1 / CPACR_EL1.
++	G0245D_PAINT 9
++
++
++	/* g0245d v123: APPLY_TUNABLES expands to Apple-private system register
++	 * accesses (per-SoC errata workarounds). MSM8996/Kryo does not implement
++	 * those encodings; an mrs there raises an undefined-instruction exception.
++	 * Disabled for this board; stage 10 marks that we got past it. */
++#if 0  /* was: defined(APPLE_ARM64_ARCH_FAMILY) -- g0245d MSM8996 */
+ 	// Read MIDR before start of per-SoC tunables
+ 	mrs x12, MIDR_EL1
+ 
+ 	APPLY_TUNABLES x12, x13, x14
+ #endif
+-
+-#if HAS_CLUSTER && !NO_CPU_OVRD
++	// g0245d v123: stage 10 - survived the (disabled) APPLY_TUNABLES block.
++	G0245D_PAINT 10
++
++	/* g0245d v123: CPU_OVRD is an Apple-private system register encoding.
++	 * On MSM8996/Kryo mrs CPU_OVRD is UNDEFINED -> synchronous exception.
++	 * Disabled for this board; stage 11 marks that we got past it. */
++#if 0  /* was: HAS_CLUSTER && !NO_CPU_OVRD -- g0245d MSM8996 */
+ 	// Unmask external IRQs if we're restarting from non-retention WFI
+ 	mrs		x9, CPU_OVRD
+ 	and		x9, x9, #(~(ARM64_REG_CYC_OVRD_irq_mask | ARM64_REG_CYC_OVRD_fiq_mask))
+ 	msr		CPU_OVRD, x9
+ #endif
++	// g0245d v123: stage 11 - survived the (disabled) CPU_OVRD block.
++	G0245D_PAINT 11
+ 
+ 	// If x21 != 0, we're doing a warm reset, so we need to trampoline to the kernel pmap.
+ 	cbnz	x21, Ltrampoline
++
++	// g0245d v123: stage 12 - not a warm reset, about to build boot args and
++	// ret into arm_init. Placed BEFORE the add x0 so the paint cannot clobber
++	// the boot-args pointer passed in x0.
++	G0245D_PAINT 12
+ 
+ 	// Set KVA of boot args as first arg
+ 	add		x0, x20, x22
