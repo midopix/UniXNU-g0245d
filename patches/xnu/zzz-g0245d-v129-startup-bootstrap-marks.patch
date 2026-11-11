@@ -1,0 +1,55 @@
+diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -260,11 +260,15 @@
+ void
+ kernel_startup_bootstrap(void)
+ {
++	extern void g0245d_paint_stage(int index);
++
+ 	/*
+ 	 * Sort the various STARTUP() entries by subsystem/rank.
+ 	 */
+ 	size_t n = startup_entries_end - startup_entries;
+ 
++	g0245d_paint_stage(16);
++
+ 	if (n == 0) {
+ 		panic("Section %s,%s missing",
+ 		    STARTUP_HOOK_SEGMENT, STARTUP_HOOK_SECTION);
+@@ -275,8 +279,12 @@
+ 		    STARTUP_HOOK_SEGMENT, STARTUP_HOOK_SECTION);
+ 	}
+ 
++	g0245d_paint_stage(17);
++
+ 	qsort(startup_entries, n, sizeof(struct startup_entry), startup_entry_cmp);
+ 
++	g0245d_paint_stage(18);
++
+ 	/*
+ 	 * Then initialize all tunables, timeouts, and locks
+ 	 */
+@@ -396,10 +404,22 @@
+ kernel_startup_initialize_upto(startup_subsystem_id_t upto)
+ {
+ 	struct startup_entry *cur = startup_entry_cur;
++	startup_subsystem_id_t mark_seen = STARTUP_SUB_NONE;
++	extern void g0245d_paint_stage(int index);
+ 
+ 	assert(startup_phase < upto);
+ 
++	g0245d_paint_stage(19);
++
+ 	while (cur < startup_entries_end && cur->subsystem <= upto) {
++		if (mark_seen != cur->subsystem) {
++			mark_seen = cur->subsystem;
++			if (mark_seen == 2) {
++				g0245d_paint_stage(20);
++			} else if (mark_seen == 3) {
++				g0245d_paint_stage(21);
++			}
++		}
+ 		if ((startup_debug & STARTUP_DEBUG_VERBOSE) &&
+ 		    startup_phase >= STARTUP_SUB_KPRINTF) {
+ 			kprintf("%s[%d, rank %d]: %p(%p)\n", __func__,

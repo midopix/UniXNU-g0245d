@@ -1,0 +1,43 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -462,11 +462,15 @@
+ 
+ 	rtclock_early_init();
+ 
++	/* g0245d v130: sub 16 - rtclock_early_init() returned */
++	g0245d_paint_stage(16);
++
+ 	kernel_debug_string_early("kernel_startup_bootstrap");
+-	kernel_startup_bootstrap();
+ 
+-	/* g0245d v128: sub 16 - kernel_startup_bootstrap() done, before timer_call_init() */
+-	g0245d_paint_stage(16);
++	/* g0245d v130: sub 17 - kernel_debug_string_early() returned, about to enter kernel_startup_bootstrap() */
++	g0245d_paint_stage(17);
++
++	kernel_startup_bootstrap();
+ 
+ 	/*
+ 	 * Initialize the timer callout world
+diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -267,8 +267,6 @@
+ 	 */
+ 	size_t n = startup_entries_end - startup_entries;
+ 
+-	g0245d_paint_stage(16);
+-
+ 	if (n == 0) {
+ 		panic("Section %s,%s missing",
+ 		    STARTUP_HOOK_SEGMENT, STARTUP_HOOK_SECTION);
+@@ -279,8 +277,6 @@
+ 		    STARTUP_HOOK_SEGMENT, STARTUP_HOOK_SECTION);
+ 	}
+ 
+-	g0245d_paint_stage(17);
+-
+ 	qsort(startup_entries, n, sizeof(struct startup_entry), startup_entry_cmp);
+ 
+ 	g0245d_paint_stage(18);
