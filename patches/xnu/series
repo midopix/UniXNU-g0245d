@@ -105,3 +105,169 @@ zzz-g0245d-v127-visible-strip-remap.patch
 # K lit bands = last sub-stage reached (1..8), K=9 means arm_init() completed.
 # start.s untouched: index>=13 still row=700+32*(index-13).
 zzz-g0245d-v128-arm-init-substages.patch
+# v129: v128 photo -> K=3 (third strip slots 13/14/15 lit 0.99/0.90/0.86,
+# 16..21 dark 0.04~0.16). So the kernel DOES run: it dies between
+# cpu_bootstrap() (band 15) and kernel_startup_bootstrap()'s return (band 16).
+# arm_init's own 16..21 marks are unreachable, so relocating them into
+# startup.c is conflict-free. This patch only touches osfmk/kern/startup.c:
+#   16 = entered kernel_startup_bootstrap()
+#   17 = n/size checks passed (n should be ~4006, section __init_entry_set 96KB)
+#   18 = qsort() of 4006 entries returned
+#   19 = entered kernel_startup_initialize_upto() (assert passed)
+#   20 = first entry of subsystem 2 (TIMEOUTS)
+#   21 = first entry of subsystem 3 (LOCKS)
+# Read-out: K=4 died before qsort; K=5 died in qsort; K=6 died before/during
+# the initialize_upto call (assert?); K=7 died in TUNABLES; K=8 died in
+# TIMEOUTS; K=9 died in LOCKS (or completed). rtclock_early_init() is nearly
+# empty on arm (only PE_register_timebase_callback), so it is not a suspect.
+zzz-g0245d-v129-startup-bootstrap-marks.patch
+# v130: v129 photo -> K=3 again, but v129's band 16 is painted at the ENTRY of
+# kernel_startup_bootstrap(); it stayed dark, so the kernel dies BEFORE entering
+# it. The gap between band 15 (after cpu_bootstrap) and that entry is only:
+#     rtclock_early_init();
+#     kernel_debug_string_early("kernel_startup_bootstrap");
+#     kernel_startup_bootstrap();
+# rtclock_early_init() (osfmk/arm/rtclock.c) is one call to
+# PE_register_timebase_callback(timebase_callback), whose callback PANICS when
+# the timebase constants look invalid - and a panic here has no console, so it
+# looks like a silent hang. DTS does carry timebase-frequency = 19200000, so the
+# constants can still be wrong for another reason.
+# This patch only re-assigns the two low slots:
+#   16 = rtclock_early_init() returned      (arm_init.c)
+#   17 = kernel_debug_string_early() returned, about to enter bootstrap
+# and removes v129's 16/17 marks inside kernel_startup_bootstrap() (18 qsort /
+# 19 initialize_upto entry / 20 TIMEOUTS / 21 LOCKS unchanged).
+# Read-out: K=4 => died INSIDE rtclock_early_init() (timebase callback panic);
+# K=5 => died in kernel_debug_string_early() or at bootstrap entry;
+# K=6 => died inside kernel_startup_bootstrap() before qsort.
+zzz-g0245d-v130-rtclock-marks.patch
+# v131: ROOT CAUSE of the band-16 blackout. v130 placed band 16 right after
+# rtclock_early_init(); it stayed dark -> the kernel dies INSIDE that function.
+# rtclock_early_init() (osfmk/arm/rtclock.c) calls
+# PE_register_timebase_callback(timebase_callback); PE_register_timebase_callback
+# (pexpert/arm/pe_init.c) unconditionally calls PE_call_timebase_callback(), which
+# fills num = gPEClockFrequencyInfo.timebase_frequency_hz, den = 1. timebase_callback
+# then does: if (den < 1 || den > 4 || num < den) panic("rtclock timebase_callback:
+# invalid constant") - and a panic this early has no console, so it looks like a
+# silent hang. gPEClockFrequencyInfo is all zero because pe_identify_machine()
+# bails out at its very first statement:
+#     if (pe_arm_get_soc_base_phys() == 0) return;
+# and pe_arm_get_soc_base_phys() only succeeds when the DT has a node with
+# name="arm-io" - an Apple-ism. This board's DT (hardware.dtb + make-adt.py) has
+# no arm-io, so it returns 0, the defaults (timebase 24 MHz) are never installed,
+# and the callback sees num=0/den=1 -> panic. Removing that early return lets the
+# defaults apply; the /cpus loop finds no "state" property on the cpu nodes and
+# simply leaves 24 MHz in place. v130's bands are kept so we can watch the next
+# milestone light up (16 = rtclock returned).
+zzz-g0245d-v131-no-armio-early-return.patch
+# v132: v131 photo -> K=9, the WHOLE third strip lit. The arm-io early-return fix
+# worked: the kernel now clears rtclock_early_init(), kernel_startup_bootstrap(),
+# qsort() and kernel_startup_initialize_upto(LOCKS) - the old "death near arm_init
+# stage 19" is gone. BUT the probe indices had become ambiguous: v128 left marks
+# 17..21 in arm_init (processor_bootstrap / arm_vm_init / serial_init /
+# PE_create_console / end) while v129 put 18..21 inside startup.c, so "9 lit" could
+# not tell WHICH painter fired. This patch rebuilds a single clean monotonic ladder
+# in arm_init.c and removes every startup.c mark:
+#   13 thread_bootstrap returned      14 cpu_bootstrap returned
+#   15 rtclock_early_init returned    16 kernel_debug_string_early returned
+#   17 kernel_startup_bootstrap returned
+#   18 processor_bootstrap returned   19 arm_vm_init returned (page-table boundary!)
+#   20 serial_init returned           21 arm_init end, just before machine_startup()
+# If 19 is lit but 20 is dark the bootstrap V=P framebuffer mapping survived
+# arm_vm_init(); if 19 is dark the kernel died at the page-table switch.
+zzz-g0245d-v132-arm-init-ladder.patch
+# v133: v132 photo -> K=6 (13..18 lit, 19..21 dark): the kernel stops at
+# arm_vm_init(). Reading osfmk/arm64/arm_vm_init.c explains it:
+#     arm_vm_physmap_init(args);
+#     set_mmu_ttb_alternate(cpu_ttep & TTBR_BADDR_MASK);
+#     set_mmu_ttb(invalid_ttep & TTBR_BADDR_MASK);   /* TTBR0 -> invalid */
+#     flush_mmu_tlb(); kva_active = TRUE;
+#     /* From here on out, we're off the bootstrap translation tables. */
+# Our framebuffer VA 0xC3401000 is a LOW address, i.e. TTBR0 space, valid only in
+# the bootstrap V=P table. So the paint() right after arm_vm_init() writes an
+# unmapped VA and faults - the "hang at arm_vm_init" may be OUR probe killing the
+# kernel, not a real bug. This patch keeps arm_init.c as the only file changed
+# (arm_vm_init.c is already modified by xnu-12377/non-apple-cache-monitor.patch, so
+# a hunk anchored there does not apply) and routes the three post-VM marks through
+# the kernel physmap instead of the dead bootstrap VA:
+#   19 = arm_vm_init() returned      20 = serial_init() returned
+#   21 = arm_init() end
+# using   va = gVirtBase + (0x83401000 - gPhysBase)   (the classic phystokv form).
+# Read-out: 19 lights => arm_vm_init really completed and the kernel runs on the
+# real kernel tables; 19 dark => either it dies there for real, or the physmap does
+# not cover the framebuffer (then we need ml_io_map instead).
+zzz-g0245d-v133-post-vm-physmap-paints.patch
+# v134: v133 (physmap painter) still showed K=6, i.e. band 19 stayed dark. Two
+# possibilities remain and they look identical on screen:
+#   (a) arm_vm_init() really dies, or
+#   (b) the physmap VA (gVirtBase + 0x83401000 - gPhysBase) is not writable and
+#       OUR paint faults.
+# The DT says the framebuffer sits at 0x83401000 inside reserved-memory under a
+# 4 GB /memory@80000000 node, so the physmap *should* cover it - which pushes the
+# balance toward (a). To settle it, put two marks INSIDE arm_vm_init() using the
+# OLD bootstrap-VA painter, which is still valid up to the TTBR switch:
+#     19 = just before arm_set_user_tbi()   (main body done, tables built)
+#     20 = immediately before set_mmu_ttb_alternate()
+# Read-out: 19 dark => died early in arm_vm_init; 19 lit / 20 dark => died between;
+# 19+20 lit => the function reached the switch, so the earlier dark 19 was our
+# physmap paint failing, not arm_vm_init.
+# NOTE: this file is already patched by xnu-12377 patches, so the hunk is generated
+# against a reconstructed tree (device patches applied first), not the raw source.
+zzz-g0245d-v134-arm-vm-init-inner-marks.patch
+# v135: v134 photo still K=6. BOTH probes were inside arm_vm_init() and used the
+# bootstrap-VA painter, which is valid there, so band 19 (just before
+# arm_set_user_tbi()) staying dark means arm_vm_init() really dies somewhere in
+# its body - this is a genuine bug, not a probe artefact.
+# Ruled out: BOOTSTRAP_TABLE_SIZE. native-4k-bootstrap-capacity.patch IS applied
+# (16 pages for native 4K; 4 GB needs 2*(1+ceil(4G/1G))+2 = 12) so the
+# "too small for memory config" panic cannot fire.
+# This patch bisects the function body with one extra early mark, and drops
+# arm_init's 19/20/21 (physmap painter) so the indices cannot collide:
+#     21 = after gPhysSize/mem_size are computed   (first ~20 statements)
+#     19 = just before arm_set_user_tbi()          (late body)
+#     20 = just before set_mmu_ttb_alternate()     (the TTBR switch)
+# Read-out: 21 dark => dies in the first statements; 21 lit/19 dark => dies in the
+# page-table construction in between; 19 lit/20 dark => dies right at the switch.
+zzz-g0245d-v135-arm-vm-init-bisect.patch
+# v136: v135 photo -> K=6 again, and v135's earliest mark (21, six statements into
+# arm_vm_init()) was ALSO dark. That squeezes the death into a tiny window:
+#     processor_bootstrap();      -> band 18 lit
+#     PE_parse_boot_argn("maxmem", ...)
+#     arm_vm_init(xmaxmem, args); -> its first 4 assignments, then band 21
+# so either the maxmem parse kills us, or the kernel never really enters
+# arm_vm_init. This patch moves the mark to the CALL SITE (arm_init.c, immediately
+# before arm_vm_init()) and drops the in-function early one, so the answer is binary:
+#     21 lit  => we reach the call; the death is inside arm_vm_init's first lines
+#     21 dark => we die before the call (maxmem parsing / the call itself)
+# 19 (before arm_set_user_tbi) and 20 (before the TTBR switch) are kept as-is.
+zzz-g0245d-v136-callsite-mark.patch
+# v137: v136 photo -> K=6 again, so band 21 AT THE CALL SITE stayed dark: the
+# kernel dies between processor_bootstrap() (band 18) and arm_vm_init().
+# That window is not just the maxmem parse, it contains:
+#     PE_parse_boot_argn("maxmem", &maxmem, ...) / PE_get_default("hw.memsize", ...)
+#     ... SCHED_HYGIENE_DEBUG block ...
+#     nanoseconds_to_absolutetime(XCALL_ACK_TIMEOUT_NS, ...)
+#     HAS_BP_RET: PE_parse_boot_argn("bpret") + set_bp_ret()
+#     PE_parse_boot_argn("immediate_NMI", ...)
+#     __builtin_arm_wsr("pan", 1)   (PAN)
+# Two real defects found in that window (both fixed here):
+#   1) PE_get_default() has NO /defaults node in this board's ADT (hardware.dtb and
+#      make-adt.py have neither /defaults nor /chosen), so it always falls through to
+#      IODTGetDefault() -> IORegistryEntry::fromPath("/defaults", gIODTPlane): a call
+#      into the IOKit registry from arm_init(), long before IOKit is up.
+#   2) "memsize" is an uninitialised uint32_t local, so if that call ever returned
+#      TRUE the kernel would do xmaxmem = <stack garbage>, and arm_vm_init() CLAMPS
+#      mem_size with it:  if (memory_size != 0 && mem_size > memory_size)
+#                             mem_size = memory_size;
+#      A small garbage value would shrink the whole physmap/bootstrapping geometry.
+# So: drop the PE_get_default branch (default xmaxmem = 0 -> use args->memSize) and
+# initialise memsize. Three marks now bisect the window:
+#     19 = maxmem resolution done
+#     20 = nanoseconds_to_absolutetime() done
+#     21 = at the arm_vm_init() call site
+# arm_vm_init.c's old 19/20 are removed so indices cannot collide.
+# Read-out: 19 dark => dies inside PE_parse_boot_argn; 19 lit/20 dark => dies in the
+# sched-hygiene/bpret/NMI/PAN group or in nanoseconds_to_absolutetime; 20 lit/21 dark
+# => dies in the last few statements; 21 lit => the window is cleared and the earlier
+# dark 19 was PE_get_default itself.
+zzz-g0245d-v137-maxmem-path.patch

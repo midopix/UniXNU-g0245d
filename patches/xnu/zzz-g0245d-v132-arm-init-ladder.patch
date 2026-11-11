@@ -1,0 +1,122 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -472,9 +472,6 @@
+ 	thread->machine.CpuDatap = &BootCpuData;
+ 	thread->machine.pcpu_data_base = (vm_offset_t)0;
+ 	machine_set_current_thread(thread);
+-	/* g0245d v128: sub 14 - current thread installed */
+-	g0245d_paint_stage(14);
+-
+ 	/*
+ 	 * Preemption is enabled for this thread so that it can lock mutexes without
+ 	 * tripping the preemption check. In reality scheduling is not enabled until
+@@ -485,20 +482,24 @@
+ 	cpu_bootstrap();
+ 
+ 	/* g0245d v128: sub 15 - cpu_bootstrap() done, before rtclock_early_init() */
+-	g0245d_paint_stage(15);
++	g0245d_paint_stage(14);
+ 
+ 	rtclock_early_init();
+ 
+ 	/* g0245d v130: sub 16 - rtclock_early_init() returned */
+-	g0245d_paint_stage(16);
++	g0245d_paint_stage(15);
+ 
+ 	kernel_debug_string_early("kernel_startup_bootstrap");
+ 
+ 	/* g0245d v130: sub 17 - kernel_debug_string_early() returned, about to enter kernel_startup_bootstrap() */
+-	g0245d_paint_stage(17);
++	g0245d_paint_stage(16);
+ 
+ 	kernel_startup_bootstrap();
+ 
++	/* g0245d v132: sub 17 - kernel_startup_bootstrap() returned */
++	g0245d_paint_stage(17);
++
++
+ 	/*
+ 	 * Initialize the timer callout world
+ 	 */
+@@ -509,7 +510,7 @@
+ 	processor_bootstrap();
+ 
+ 	/* g0245d v128: sub 17 - processor_bootstrap() done, before arm_vm_init() */
+-	g0245d_paint_stage(17);
++	g0245d_paint_stage(18);
+ 
+ 	if (PE_parse_boot_argn("maxmem", &maxmem, sizeof(maxmem))) {
+ 		xmaxmem = (uint64_t) maxmem * (1024 * 1024);
+@@ -561,7 +562,7 @@
+ 	/* g0245d v128: sub 18 - arm_vm_init() done (page-table boundary).
+ 	 * If 13..17 are lit but 18..21 stay dark, the bootstrap V=P
+ 	 * framebuffer mapping was lost here rather than a kernel hang. */
+-	g0245d_paint_stage(18);
++	g0245d_paint_stage(19);
+ 
+ 	if (debug_boot_arg) {
+ 		patch_low_glo();
+@@ -577,7 +578,7 @@
+ 	const unsigned int serial_exists = serial_init();
+ 
+ 	/* g0245d v128: sub 19 - serial_init() done, before kprintf/console path */
+-	g0245d_paint_stage(19);
++	g0245d_paint_stage(20);
+ 
+ 	kernel_startup_initialize_upto(STARTUP_SUB_KPRINTF);
+ 	kprintf("kprintf initialized\n");
+@@ -622,9 +623,6 @@
+ 	}
+ 	PE_create_console();
+ 
+-	/* g0245d v128: sub 20 - PE_create_console() done, before PE_init_printf() */
+-	g0245d_paint_stage(20);
+-
+ 	/* setup console output */
+ 	PE_init_printf(FALSE);
+ 
+diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -260,8 +260,6 @@
+ void
+ kernel_startup_bootstrap(void)
+ {
+-	extern void g0245d_paint_stage(int index);
+-
+ 	/*
+ 	 * Sort the various STARTUP() entries by subsystem/rank.
+ 	 */
+@@ -279,8 +277,6 @@
+ 
+ 	qsort(startup_entries, n, sizeof(struct startup_entry), startup_entry_cmp);
+ 
+-	g0245d_paint_stage(18);
+-
+ 	/*
+ 	 * Then initialize all tunables, timeouts, and locks
+ 	 */
+@@ -400,22 +396,10 @@
+ kernel_startup_initialize_upto(startup_subsystem_id_t upto)
+ {
+ 	struct startup_entry *cur = startup_entry_cur;
+-	startup_subsystem_id_t mark_seen = STARTUP_SUB_NONE;
+-	extern void g0245d_paint_stage(int index);
+ 
+ 	assert(startup_phase < upto);
+ 
+-	g0245d_paint_stage(19);
+-
+ 	while (cur < startup_entries_end && cur->subsystem <= upto) {
+-		if (mark_seen != cur->subsystem) {
+-			mark_seen = cur->subsystem;
+-			if (mark_seen == 2) {
+-				g0245d_paint_stage(20);
+-			} else if (mark_seen == 3) {
+-				g0245d_paint_stage(21);
+-			}
+-		}
+ 		if ((startup_debug & STARTUP_DEBUG_VERBOSE) &&
+ 		    startup_phase >= STARTUP_SUB_KPRINTF) {
+ 			kprintf("%s[%d, rank %d]: %p(%p)\n", __func__,

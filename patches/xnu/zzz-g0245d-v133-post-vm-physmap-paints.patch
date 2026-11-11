@@ -1,0 +1,66 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -187,6 +187,35 @@
+  */
+ void arm_init(boot_args * args);
+ 
++/*
++ * g0245d v133: paint a band AFTER the bootstrap translation tables are gone.
++ * g0245d_paint_stage() writes VA 0xC3401000, which only exists in the TTBR0
++ * bootstrap (V=P) table; arm_vm_init() switches TTBR0 to invalid_ttep and then
++ * drops the bootstrap tables, so any later write to that VA faults. Route the
++ * post-VM marks through the kernel physmap instead (gVirtBase + pa - gPhysBase).
++ */
++static void
++g0245d_paint_stage_vm(int index)
++{
++	extern vm_offset_t gVirtBase;
++	extern vm_offset_t gPhysBase;
++	const uint64_t fb_pa    = 0x83401000ULL;
++	const uint64_t rowbytes = 0xCA8ULL;
++	uint64_t       va, off, n;
++	uint32_t      *p;
++	int            h;
++
++	off = (uint64_t)((index >= 13) ? (700 + 32 * (index - 13)) : (200 + 64 * index)) * rowbytes;
++	h   = (index >= 13) ? 16 : 32;
++	va  = (uint64_t)gVirtBase + (fb_pa - (uint64_t)gPhysBase);
++	p   = (uint32_t *)(uintptr_t)(va + off);
++	n   = (uint64_t)h * rowbytes / 4;
++	while (n--) {
++		*p++ = 0xFFFFFFFFu;
++	}
++}
++
++
+ #if __arm64__
+ unsigned int page_shift_user32; /* for page_size as seen by a 32-bit task */
+ 
+@@ -562,7 +591,7 @@
+ 	/* g0245d v128: sub 18 - arm_vm_init() done (page-table boundary).
+ 	 * If 13..17 are lit but 18..21 stay dark, the bootstrap V=P
+ 	 * framebuffer mapping was lost here rather than a kernel hang. */
+-	g0245d_paint_stage(19);
++	g0245d_paint_stage_vm(19);
+ 
+ 	if (debug_boot_arg) {
+ 		patch_low_glo();
+@@ -578,7 +607,7 @@
+ 	const unsigned int serial_exists = serial_init();
+ 
+ 	/* g0245d v128: sub 19 - serial_init() done, before kprintf/console path */
+-	g0245d_paint_stage(20);
++	g0245d_paint_stage_vm(20);
+ 
+ 	kernel_startup_initialize_upto(STARTUP_SUB_KPRINTF);
+ 	kprintf("kprintf initialized\n");
+@@ -706,7 +735,7 @@
+ 	 * thread_bootstrap() and PE_init_printf(). v128 puts eight fine-grained
+ 	 * marks (13..20) inside that window. If this one lights, arm_init()
+ 	 * completed and the hang moved past machine_startup(args). */
+-	g0245d_paint_stage(21);
++	g0245d_paint_stage_vm(21);
+ 	machine_startup(args);
+ }
+ 

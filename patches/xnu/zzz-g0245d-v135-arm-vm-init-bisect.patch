@@ -1,0 +1,51 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -588,11 +588,6 @@
+ 
+ 	arm_vm_init(xmaxmem, args);
+ 
+-	/* g0245d v128: sub 18 - arm_vm_init() done (page-table boundary).
+-	 * If 13..17 are lit but 18..21 stay dark, the bootstrap V=P
+-	 * framebuffer mapping was lost here rather than a kernel hang. */
+-	g0245d_paint_stage_vm(19);
+-
+ 	if (debug_boot_arg) {
+ 		patch_low_glo();
+ 	}
+@@ -606,9 +601,6 @@
+ 	/* Setup debugging output. */
+ 	const unsigned int serial_exists = serial_init();
+ 
+-	/* g0245d v128: sub 19 - serial_init() done, before kprintf/console path */
+-	g0245d_paint_stage_vm(20);
+-
+ 	kernel_startup_initialize_upto(STARTUP_SUB_KPRINTF);
+ 	kprintf("kprintf initialized\n");
+ 
+@@ -729,13 +721,6 @@
+ 	 * against string vulnerabilities
+ 	 */
+ 	__stack_chk_guard &= ~(0xFFULL << 8);
+-	/* g0245d v128: SELF-CHECK (topmost third-strip band, row 956).
+-	 * v127 showed the whole third strip dark while main/sub strips stayed
+-	 * lit -> arm_init() never completes; v125 actually stopped between
+-	 * thread_bootstrap() and PE_init_printf(). v128 puts eight fine-grained
+-	 * marks (13..20) inside that window. If this one lights, arm_init()
+-	 * completed and the hang moved past machine_startup(args). */
+-	g0245d_paint_stage_vm(21);
+ 	machine_startup(args);
+ }
+ 
+diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -2190,6 +2190,8 @@
+ 	 */
+ 	gPhysSize = mem_size = ((gPhysBase + args->memSize) & ~PAGE_MASK) - gPhysBase;
+ 
++	g0245d_paint_stage(21);
++
+ 	mem_actual = args->memSizeActual ? args->memSizeActual : mem_size;
+ 
+ 	if ((memory_size != 0) && (mem_size > memory_size)) {
