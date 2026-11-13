@@ -218,7 +218,7 @@ stage 19 已跑过；HAS_BP_RET 未定义被编出）。
 `g0245d_mark_va()` / `g0245d_mark_vm()`；补丁备份
 `patches/xnu/zzz-g0245d-v139-color-stages.patch`。
 构建：`linux/build-v139-all.sh`（去掉 v138 脚本里重复的 payload 步骤）。
-判读：`workspace/tmp/analyze_color_stage.py <照片>`（深灰判黑、低饱和高亮判白、否则按主通道定色）。
+判读：`analyze_color_stage.py <照片>`（本机在 `workspace/tmp/`，仓库内是 `scripts/linux/`；深灰判黑、低饱和高亮判白、否则按主通道定色）。
 
 ### 尚未排除的干扰项
 - 若 v139 仍全黑，需检查 `PE_create_console()` 是否有无条件清屏/初始化显示的动作，
@@ -245,8 +245,9 @@ stage 19 已跑过；HAS_BP_RET 未定义被编出）。
 
 ## 十、工具链全量体检（2026-11-13 20:15–21:05）
 
-新增 `linux/check-toolchain.sh`（68 项，分组体检，真执行而非只看 PATH），
-`bash linux/check-toolchain.sh [--verbose]`，沙箱内也会打印 /dev 与 Seccomp 判定。
+新增 `check-toolchain.sh`（68 项，分组体检，真执行而非只看 PATH；
+本机在 `linux/`，仓库内是 `scripts/linux/`），
+`bash check-toolchain.sh [--verbose]`，沙箱内也会打印 /dev 与 Seccomp 判定。
 
 ### 结论：构建链 68/68 全绿，缺的只有 Python 包
 - LLVM：系统/UEFI 侧 clang **21.1.8**（toolchain-root/usr/lib/llvm-21，含 lld-link）；
