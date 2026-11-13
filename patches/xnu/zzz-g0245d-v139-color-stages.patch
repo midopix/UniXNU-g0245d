@@ -1,0 +1,316 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+index 8fe43b6..bcd7b11 100644
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -187,6 +187,114 @@ SECURITY_READ_ONLY_LATE(bool) enable_processor_exit = false;
+  */
+ void arm_init(boot_args * args);
+ 
++/*
++ * g0245d v133: paint a band AFTER the bootstrap translation tables are gone.
++ * g0245d_paint_stage() writes VA 0xC3401000, which only exists in the TTBR0
++ * bootstrap (V=P) table; arm_vm_init() switches TTBR0 to invalid_ttep and then
++ * drops the bootstrap tables, so any later write to that VA faults. Route the
++ * post-VM marks through the kernel physmap instead (gVirtBase + pa - gPhysBase).
++ */
++static void
++g0245d_paint_stage_vm(int index)
++{
++	extern vm_offset_t gVirtBase;
++	extern vm_offset_t gPhysBase;
++	const uint64_t fb_pa    = 0x83401000ULL;
++	const uint64_t rowbytes = 0xCA8ULL;
++	uint64_t       va, off, n;
++	uint32_t      *p;
++	int            h;
++
++	off = (uint64_t)((index >= 13) ? (700 + 32 * (index - 13)) : (200 + 64 * index)) * rowbytes;
++	h   = (index >= 13) ? 16 : 32;
++	va  = (uint64_t)gVirtBase + (fb_pa - (uint64_t)gPhysBase);
++	p   = (uint32_t *)(uintptr_t)(va + off);
++	n   = (uint64_t)h * rowbytes / 4;
++	while (n--) {
++		*p++ = 0xFFFFFFFFu;
++	}
++}
++
++/*
++ * g0245d v139: color-coded stage marks.
++ *
++ * v138 (PAN off) no longer freezes on a painted band - the screen goes BLACK
++ * after handoff. That is ambiguous: either XNU still dies earlier (nothing
++ * painted), or it ran much further and something (PE_create_console / vc)
++ * cleared the framebuffer. The cumulative band scheme cannot tell the two
++ * apart, so repaint the WHOLE framebuffer with one solid colour per stage:
++ * whatever colour stays on screen is the last stage that actually executed,
++ * and a fully black screen then means "went past the final mark".
++ *
++ *   21 = yellow   (just before arm_vm_init(), still on bootstrap VA)
++ *   22 = red      (arm_vm_init returned)
++ *   23 = green    (serial_init returned)
++ *   24 = blue     (PE_create_console returned)
++ *   25 = white    (about to enter machine_startup)
++ */
++#define G0245D_FB_PA        0x83401000ULL
++#define G0245D_FB_ROWBYTES  0xCA8ULL
++#define G0245D_FB_ROWS      1920ULL
++
++/*
++ * NOTE: the panel is RGB888 (24bpp, 3 bytes per pixel), NOT 32bpp. Writing
++ * 32-bit words only looks right for white (all 0xFF); for any other colour the
++ * extra byte shifts the pixel grid and the screen shows a cycling
++ * yellow/magenta/cyan stripe pattern instead of a solid colour. So fill one
++ * 3-byte (B,G,R) triplet per pixel.
++ */
++static void
++g0245d_fill_fb(uint64_t fb_va, uint32_t color)
++{
++	uint8_t *p = (uint8_t *)(uintptr_t)fb_va;
++	uint8_t  b = (uint8_t)(color & 0xFFu);
++	uint8_t  g = (uint8_t)((color >> 8) & 0xFFu);
++	uint8_t  r = (uint8_t)((color >> 16) & 0xFFu);
++	uint64_t n = (G0245D_FB_ROWS * G0245D_FB_ROWBYTES) / 3;
++
++	while (n--) {
++		*p++ = b;
++		*p++ = g;
++		*p++ = r;
++	}
++}
++
++static uint32_t
++g0245d_stage_color(int index)
++{
++	switch (index) {
++	case 21: return 0xFFFFFF00u;  /* yellow */
++	case 22: return 0xFFFF0000u;  /* red    */
++	case 23: return 0xFF00FF00u;  /* green  */
++	case 24: return 0xFF0000FFu;  /* blue   */
++	default: return 0xFFFFFFFFu;  /* white  */
++	}
++}
++
++/* Before arm_vm_init(): framebuffer lives at its bootstrap VA (V=P window). */
++static void
++g0245d_mark_va(int index)
++{
++	extern void g0245d_paint_stage(int index);
++
++	g0245d_fill_fb(0xC3401000ULL, g0245d_stage_color(index));
++	g0245d_paint_stage(index);
++}
++
++/* After arm_vm_init(): reach the framebuffer through the kernel physmap. */
++static void
++g0245d_mark_vm(int index)
++{
++	extern vm_offset_t gVirtBase;
++	extern vm_offset_t gPhysBase;
++	uint64_t va;
++
++	va = (uint64_t)gVirtBase + (G0245D_FB_PA - (uint64_t)gPhysBase);
++	g0245d_fill_fb(va, g0245d_stage_color(index));
++	g0245d_paint_stage_vm(index);
++}
++
++
+ #if __arm64__
+ unsigned int page_shift_user32; /* for page_size as seen by a 32-bit task */
+ 
+@@ -347,16 +455,27 @@ arm_init(
+ 	boot_args       *args)
+ {
+ 	unsigned int    maxmem;
+-	uint32_t        memsize;
++	uint32_t        memsize = 0;
+ 	uint64_t        xmaxmem;
+ 	thread_t        thread;
+ 	DTEntry chosen = NULL;
+ 	unsigned int dt_entry_size = 0;
+ 
++	/*
++	 * g0245d v122: stage 7 - reached the C entry point (arm_init). Paint a
++	 * band through the post-MMU framebuffer mapping to prove the kernel got
++	 * this far. Self-contained: depends only on the bootstrap V=P table and
++	 * the g0245d_paint_stage symbol defined in start.s.
++	 */
++	extern void g0245d_paint_stage(int index);
++	g0245d_paint_stage(7);
++
++
+ 	arm_setup_pre_sign();
+ 
+ 	arm_slide_rebase_and_sign_image();
+ 
++
+ 	/* If kernel integrity is supported, use a constant copy of the boot args. */
+ 	const_boot_args = *args;
+ 	BootArgs = args = &const_boot_args;
+@@ -371,12 +490,21 @@ arm_init(
+ 	PE_init_platform(FALSE, args); /* Get platform expert set up */
+ 
+ #if __arm64__
++#if 0  /* g0245d v125: Apple-SoC-private timer/WFE/misc register helpers.
++	 * v124 died between stage 16 and stage 17, i.e. inside this block.
++	 * The same class of registers (APPLY_TUNABLES / CPU_OVRD in start.s)
++	 * already had to be disabled on MSM8996/Kryo, where they are UNDEFINED.
++	 * Keep the stage 17/18 marks outside the block so the readout stays
++	 * unchanged; stages 19/20/21 show whether we get past machine_startup. */
+ 	configure_timer_apple_regs();
+ 	wfe_timeout_configure();
+ 	wfe_timeout_init();
+ 
+ 	configure_misc_apple_boot_args();
++#endif
++#if 0  /* g0245d v125: Apple-private misc registers, UNDEFINED on Kryo */
+ 	configure_misc_apple_regs(true);
++#endif
+ 
+ #if (DEVELOPMENT || DEBUG)
+ 	unsigned long const *platform_stall_ptr = NULL;
+@@ -399,6 +527,10 @@ arm_init(
+ 
+ 
+ 	{
++		/* Native non-Apple 4K builds expose the hardware page size at any RAM size. */
++#if !defined(APPLE_ARM64_ARCH_FAMILY) && !__ARM_16K_PG__
++		PAGE_SHIFT_CONST = ARM_PGSHIFT;
++#else
+ 		/*
+ 		 * Select the advertised kernel page size.
+ 		 */
+@@ -417,8 +549,14 @@ arm_init(
+ 			PAGE_SHIFT_CONST = ARM_PGSHIFT;
+ 		}
+ 
++#endif
++
++#if !defined(APPLE_ARM64_ARCH_FAMILY) && !__ARM_16K_PG__
++		page_shift_user32 = ARM_PGSHIFT;
++#else
+ 		/* 32-bit apps always see 16KB page size */
+ 		page_shift_user32 = PAGE_MAX_SHIFT;
++#endif
+ #ifdef  APPLETYPHOON
+ 		if (PE_parse_boot_argn("cpus_defeatures", &cpus_defeatures, sizeof(cpus_defeatures))) {
+ 			if ((cpus_defeatures & 0xF) != 0) {
+@@ -447,10 +585,11 @@ arm_init(
+ 	    - (uintptr_t)(args->virtBase)));
+ 
+ 	thread = thread_bootstrap();
++	/* g0245d v128: sub 13 - thread_bootstrap() returned (v124 stage 19 anchor) */
++	g0245d_paint_stage(13);
+ 	thread->machine.CpuDatap = &BootCpuData;
+ 	thread->machine.pcpu_data_base = (vm_offset_t)0;
+ 	machine_set_current_thread(thread);
+-
+ 	/*
+ 	 * Preemption is enabled for this thread so that it can lock mutexes without
+ 	 * tripping the preemption check. In reality scheduling is not enabled until
+@@ -460,11 +599,25 @@ arm_init(
+ 	thread->machine.preemption_count = 0;
+ 	cpu_bootstrap();
+ 
++	/* g0245d v128: sub 15 - cpu_bootstrap() done, before rtclock_early_init() */
++	g0245d_paint_stage(14);
++
+ 	rtclock_early_init();
+ 
++	/* g0245d v130: sub 16 - rtclock_early_init() returned */
++	g0245d_paint_stage(15);
++
+ 	kernel_debug_string_early("kernel_startup_bootstrap");
++
++	/* g0245d v130: sub 17 - kernel_debug_string_early() returned, about to enter kernel_startup_bootstrap() */
++	g0245d_paint_stage(16);
++
+ 	kernel_startup_bootstrap();
+ 
++	/* g0245d v132: sub 17 - kernel_startup_bootstrap() returned */
++	g0245d_paint_stage(17);
++
++
+ 	/*
+ 	 * Initialize the timer callout world
+ 	 */
+@@ -474,13 +627,27 @@ arm_init(
+ 
+ 	processor_bootstrap();
+ 
++	/* g0245d v128: sub 17 - processor_bootstrap() done, before arm_vm_init() */
++	g0245d_paint_stage(18);
++
++	/*
++	 * g0245d v137: do NOT call PE_get_default() here. When the ADT has no
++	 * /defaults node (this board's ADT has none) it falls through to
++	 * IODTGetDefault() -> IORegistryEntry::fromPath("/defaults", gIODTPlane),
++	 * i.e. into the IOKit registry while we are still in arm_init(). Worse,
++	 * "memsize" is an uninitialised local, so any TRUE return would set xmaxmem
++	 * to stack garbage - and arm_vm_init() uses that value to CLAMP mem_size
++	 * ("if (memory_size != 0 && mem_size > memory_size) mem_size = memory_size;").
++	 * Default to 0 instead, which makes arm_vm_init() use args->memSize.
++	 */
+ 	if (PE_parse_boot_argn("maxmem", &maxmem, sizeof(maxmem))) {
+ 		xmaxmem = (uint64_t) maxmem * (1024 * 1024);
+-	} else if (PE_get_default("hw.memsize", &memsize, sizeof(memsize))) {
+-		xmaxmem = (uint64_t) memsize;
+ 	} else {
+ 		xmaxmem = 0;
+ 	}
++	(void)memsize;
++
++	g0245d_paint_stage(19);   /* v137: maxmem resolution done */
+ 
+ #if SCHED_HYGIENE_DEBUG
+ 	{
+@@ -508,6 +675,8 @@ arm_init(
+ 
+ 	nanoseconds_to_absolutetime(XCALL_ACK_TIMEOUT_NS, &xcall_ack_timeout_abstime);
+ 
++	g0245d_paint_stage(20);   /* v137: nanoseconds_to_absolutetime done */
++
+ #if HAS_BP_RET
+ 	PE_parse_boot_argn("bpret", &bp_ret, sizeof(bp_ret));
+ 	set_bp_ret(); // Apply branch predictor retention settings to boot CPU
+@@ -519,8 +688,13 @@ arm_init(
+ 	__builtin_arm_wsr("pan", 1);
+ #endif  /* __ARM_PAN_AVAILABLE__ */
+ 
++	g0245d_paint_stage(21);   /* v136: at the arm_vm_init() call site */
++	g0245d_mark_va(21);       /* v139: YELLOW - entering arm_vm_init() */
++
+ 	arm_vm_init(xmaxmem, args);
+ 
++	g0245d_mark_vm(22);       /* v139: RED - arm_vm_init() returned */
++
+ 	if (debug_boot_arg) {
+ 		patch_low_glo();
+ 	}
+@@ -533,6 +707,9 @@ arm_init(
+ 
+ 	/* Setup debugging output. */
+ 	const unsigned int serial_exists = serial_init();
++
++	g0245d_mark_vm(23);       /* v139: GREEN - serial_init() returned */
++
+ 	kernel_startup_initialize_upto(STARTUP_SUB_KPRINTF);
+ 	kprintf("kprintf initialized\n");
+ 
+@@ -576,6 +753,8 @@ arm_init(
+ 	}
+ 	PE_create_console();
+ 
++	g0245d_mark_vm(24);       /* v139: BLUE - console created (vc may have cleared the screen) */
++
+ 	/* setup console output */
+ 	PE_init_printf(FALSE);
+ 
+@@ -653,6 +832,8 @@ arm_init(
+ 	 * against string vulnerabilities
+ 	 */
+ 	__stack_chk_guard &= ~(0xFFULL << 8);
++	g0245d_mark_vm(25);       /* v139: WHITE - entering machine_startup() */
++
+ 	machine_startup(args);
+ }
+ 

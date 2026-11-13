@@ -271,3 +271,27 @@ zzz-g0245d-v136-callsite-mark.patch
 # => dies in the last few statements; 21 lit => the window is cleared and the earlier
 # dark 19 was PE_get_default itself.
 zzz-g0245d-v137-maxmem-path.patch
+# v138: v137 photo -> K=6, i.e. the window between band 18 (processor_bootstrap)
+# and band 21 (arm_vm_init call site) still kills the kernel. The v137 patch had
+# already removed the two real defects found there (PE_get_default("hw.memsize")
+# without a /defaults node, and the uninitialised memsize local), so what is left
+# in that window is the PAN sequence: arch/configs/common.config sets
+# CONFIG_XNU_NATIVE_PAN=y, native-arm-pan.patch then defines
+# __ARM_PAN_AVAILABLE__=1 in BCM2837.h and arm_init.c executes
+# __builtin_arm_wsr("pan", 1). PAN is ARMv8.1+; MSM8996 Kryo is ARMv8.0, so this
+# is an undefined instruction - a silent freeze with no console. v138 is that
+# config change only (# CONFIG_XNU_NATIVE_PAN is not set in
+# configs/g0245d_defconfig), no patch file needed.
+# Hardware result (2026-11-13): the kernel no longer freezes; the BootShim log is
+# complete, 4 inputs validate, boot services exit - and then the screen goes
+# BLACK. So the PAN root cause is confirmed and XNU runs well past arm_init().
+# v139: replace the band painters with full-screen colour stages. Bands cannot
+# express "which of the last few stages" once the kernel is that far along, and a
+# band needs its geometry validated against the panel each time; one flat colour
+# per stage is unambiguous in a single photo:
+#   yellow = before arm_vm_init   red   = inside arm_vm_init
+#   green  = serial_init          blue  = PE_create_console()
+#   white  = just before machine_startup   black = later still
+# The fill routine writes 3 bytes per pixel (B,G,R): this panel is RGB888 /
+# 24bpp, so 32-bit fills would render as yellow/magenta/cyan stripes.
+zzz-g0245d-v139-color-stages.patch
