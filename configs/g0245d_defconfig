@@ -9,6 +9,14 @@ CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
 # CONFIG_XNU_NATIVE_UFS is not set        (needs NativeUfs8996 component)
 # CONFIG_XNU_NATIVE_ADRENO is not set     (needs Adreno530 component)
 # CONFIG_XNU_NATIVE_LEGACY_DISPLAY is not set (needs GopFramebuffer + firmware FB)
+# v138 (2026-11-13): PAN is ARMv8.1+; MSM8996 Kryo is ARMv8.0 (no PAN).
+# arch common.config sets CONFIG_XNU_NATIVE_PAN=y, which makes native-arm-pan.patch
+# define __ARM_PAN_AVAILABLE__=1 in BCM2837.h, so arm_init.c executes
+# __builtin_arm_wsr("pan", 1) between paint_stage(20) and paint_stage(21)
+# -> undefined-instruction exception on Kryo -> freeze (v137 freeze, K=8).
+# Turning it off also drops the -march=armv8.1-a on copyio/pcb/platform_tests,
+# whose user_access_enable/disable would fault later for the same reason.
+# CONFIG_XNU_NATIVE_PAN is not set
 # Secondary CPU bring-up: enable after the GIC 3-cell specifier check passes.
 # CONFIG_XNU_ARMCPU_SECONDARY is not set
 # arch:configs/common.config turns on CONFIG_XNU_BUILD_ARCHIVES=y, so
