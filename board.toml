@@ -138,7 +138,7 @@ kernelcache = "../../../../ipsw/21H461/kernelcache.decompressed"
 # 这里只把 url 覆盖为本机已缓存的 IPSW，避免 unixnu ipsw / watchdog 自动
 # 完整预链接时联网下载；其余字段与 profile 保持一致。
 [ipsw]
-url = "/home/myth/WorkBuddy/2026-11-06-14-39-31/g0245d/workspace/tmp/ipsw-cache/21H461.ipsw"
+url = "/home/myth/WorkBuddy/2026-11-12-19-08-50/g0245d/workspace/tmp/ipsw-cache/21H461.ipsw"
 
 [components]
 # Stage 1 set: platform, CPU, crypto, prelink, loader — baseline bring-up.
