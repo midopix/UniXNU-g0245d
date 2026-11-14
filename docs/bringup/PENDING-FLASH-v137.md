@@ -279,3 +279,23 @@ stage 19 已跑过；HAS_BP_RET 未定义被编出）。
 - `linux/build-v139-all.sh` 全流程 3m17s 通过；内核 sha256 仍 `56ded44a…`（未变），
   但打包出的 img md5 变成 **`95b06fac9207c5581f06cd2567fc0d5c`**（FAT 卷时间戳不同，
   与内核无关）。刷机请用这个新 md5。
+
+## 十一、v139 判读与 v140（2026-11-14）
+
+- **v139 实拍**（整屏品红+网格纹理+屏幕 45% 高一条白线+上下边缘彩噪带）：
+  - **白线 = stage 24 的白带**（`g0245d_paint_stage_vm(24)`，fb row 1052，上下颠倒后
+    屏幕顶部 45.2%，实测 45.9% 吻合）→ **PE_create_console() 已返回，死点在 24 与 25 之间**。
+    比 v138 的黑屏又前进一站。
+  - **品红花屏**：整屏蓝色 fill 被 vc console 用不匹配的像素格式重写（网格纹理=stride 错位、
+    上下噪点带=行错位累积）。结论：**颜色 fill 在 console 之后不可信；全 0xFF 白带任何
+    像素格式下都是白**——这是 v137 几何一直可读的原因。测白线 RGB=(205,220,225) 基本纯白、
+    主体 (189,57,237) 真品红，排除了相机偏色。
+- **v140**：删 `g0245d_fill_fb`/`stage_color`（颜色编码退役），恢复 v137 白带几何
+  （rowbytes 0xCA8），第三组带梯扩到 **26..34**：
+  `26 PE_init_printf / 27 cpu_machine_idle_init / 28 PE_init_platform /
+   29 ml_map_cpu_pio / 30 cpu_timebase_init / 31 kptimer_curcpu_up /
+   32 PE_init_cpu / 33 fiq_context_init / 34 DT dram-base/size`。
+  `g0245d_mark_vm()` 每次**重画 13..index 全带**（vc 清屏会抹掉走 bootstrap VA 的带 21，
+  重画保证链条完整）。判读 `analyze_bands_native.py`：**K = 最高带号 − 12**（K=9 → 带 21，
+  K=22 → 带 34；链条已放宽到 0.48H 跨度）。
+- 构建脚本 `linux/build-v140-all.sh`；patch `zzz-g0245d-v140-band-stages.patch`。
