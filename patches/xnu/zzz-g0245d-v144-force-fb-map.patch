@@ -1,0 +1,19 @@
+diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
+index 4c1edf1..05d887d 100644
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -2841,6 +2841,14 @@ initialize_screen(PE_Video * boot_vinfo, unsigned int op)
+ 		 */
+ 		newVideoVirt = boot_vinfo->v_baseAddr;
+ 		makeMapping = (kernel_map == VM_MAP_NULL) || (0 != (1 & newVideoVirt));
++		/* G0245D v144: the boot shim passes a raw PHYSICAL framebuffer
++		 * address with bit0 clear, so the check above misses it and the
++		 * console would use a physical address as a kernel VA -> the very
++		 * first console write faults and the screen stays black. Any address
++		 * in the low (non kernel-VA) range is physical: force the mapping. */
++		if ((uint64_t)newVideoVirt < 0x0001000000000000ULL) {
++			makeMapping = TRUE;
++		}
+ 		if (makeMapping) {
+ 			newVideoVirt = 0;
+ 			new_vinfo.v_physaddr = boot_vinfo->v_baseAddr & ~3UL;           /* Get the physical address */

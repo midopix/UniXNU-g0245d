@@ -294,4 +294,115 @@ zzz-g0245d-v137-maxmem-path.patch
 #   26 PE_init_printf   27 cpu_machine_idle_init  28 PE_init_platform
 #   29 ml_map_cpu_pio   30 cpu_timebase_init      31 kptimer_curcpu_up
 #   32 PE_init_cpu      33 fiq_context_init       34 DT dram-base/size
-zzz-g0245d-v140-band-stages.patch
+#
+# G0245D v141 (hardware 2026-11-14): v140's physmap band repaint (mark_vm ->
+# g0245d_paint_stage_vm) faults the first time it runs, right after arm_vm_init.
+# Photo read-out: bands 13..21 lit, 22..34 all dark, and NO v139-like magenta
+# console -> it died before PE_create_console, i.e. EARLIER than v139. So v141
+# drops v140's mark_vm/mark_va repaint entirely and instead leans on the vc
+# console log. The boot shim reports width=1000 but rowBytes=3240 (a 32bpp line
+# is 810 px), so the console overruns every row and smears into a pattern; v141
+# recomputes v_width = rowBytes/(depth>>3) so the console matches the stride.
+zzz-g0245d-v141-console-width.patch
+
+# G0245D v142 (hardware 2026-11-14): with v141 the screen briefly shows the
+# bootloader + white bands 13..21, then goes BLACK. Black = the console init /
+# clear ran (so arm_vm_init + serial_init + PE_create_console all returned), but
+# no text is emitted -> it dies right after PE_create_console, before/at
+# PE_init_printf (same region as v139's 24<->25 death). To see exactly WHERE it
+# dies after the console, paint the bands through the console's OWN mapped fb VA
+# (vinfo.v_baseaddr - the VA the clear uses, guaranteed mapped), NOT the physmap
+# VA v140 tried (which faulted). g0245d_vc_paint() lives in video_console.c and
+# is called after each post-console step; it repaints 13..index so console clears
+# between steps stay visible. Highest lit band = the last step completed.
+# DROPPED in v143: console text now carries the progress; these white bands
+# would blank out half the text rows and fight the log. Kept on disk for archive.
+# zzz-g0245d-v142-postconsole-vc-bands.patch
+
+# G0245D v143 (hardware 2026-11-14): the root cause of the "bands then black"
+# screens. In arm_init() the boot args carry serial=3 (SERIALMODE_OUTPUT) and
+# serial_init() enumerated a UART, so the kernel calls switch_to_serial_console()
+# BEFORE PE_create_console(). kprintf is then routed to a ttyHSL0 that has no
+# physical connector, and PE_create_console() clears the fb to black - so the
+# screen is black with NO output even though the kernel is still running on the
+# serial path. v143 forces the console back onto the video fb right after
+# PE_create_console() so the boot log prints to the screen and the real death
+# point becomes visible.
+zzz-g0245d-v143-force-video-console.patch
+
+# G0245D v144 (hardware 2026-11-14): the real reason every console write killed
+# the screen. PE_create_console does NOT clear; instead vc_initialize() decides
+# whether to ml_io_map_unmappable() the framebuffer from the boot shim's
+# v_baseAddr. The shim hands us the RAW PHYSICAL address 0x83401000 with bit0
+# clear, so makeMapping stays FALSE and the console uses that physical address
+# as a kernel VA. The first console write (kprintf, or v142's band paint) then
+# faults -> panic -> black. v144 treats any address below the kernel-VA range as
+# physical and forces the mapping. With a valid fb VA and v143 forcing the video
+# console, the boot log should finally print to the screen.
+zzz-g0245d-v144-force-fb-map.patch
+
+# G0245D v145 (hardware 2026-11-14): v144 (forced fb mapping) still showed only
+# "bands then black", so the console-vs-fb theory is not confirmed. Decisive
+# panel test: right before arm_vm_init (bootstrap VA 0xC3401000 still valid per
+# start.s), fill the WHOLE framebuffer solid white (3240*1920 bytes). Reads:
+#   - whole screen stays bright white -> panel/backlight is still ON after
+#     arm_vm_init; the black was fb content / console routing (fixable in sw).
+#   - goes black -> the display/backlight itself is switched off around
+#     arm_vm_init (hardware/clock/DSI), and fb writes can never show: need a
+#     real display init / keep the panel powered, not more fb writes.
+# v145 (fullscreen white) + v146 (white+halt) were DIAGNOSTIC: they proved the
+# display works (v146 showed a pure-white screen). Now that 24bpp is the fix,
+# they are disabled so the console can run on the real boot path.
+# zzz-g0245d-v145-fullscreen-white.patch
+# zzz-g0245d-v146-white-halt.patch
+
+# G0245D v147 (hardware 2026-11-14): THE display fix. v146 (full-white fill +
+# halt) proved the panel/MDP5/fb-write path all work (screen went pure white), so
+# the "black screen" was never hardware: the ft8716 panel is 24bpp RGB888 but the
+# XNU vc console only has 8/16/30/32 paths, so it painted a 32bpp black
+# background over the framebuffer. v147 adds a real 24bpp path to the video
+# console (vc_render_char case 24, vc_paint_char_24 at 3 bytes/pixel, dispatch)
+# and forces v_depth=24 + v_width=rowBytes/3=1080 in pe_init. White-on-black is
+# byte-order agnostic, so the boot log should finally render on the panel.
+zzz-g0245d-v147-console-24bpp.patch
+
+# G0245D v148 (hardware 2026-11-14): v147 also showed "bands flash then black".
+# Root cause of the black: machine_startup calls initialize_screen(NULL,
+# kPEAcquireScreen), which (a) runs vc_progress_set() -> wipes the framebuffer
+# to the progress background and (b) runs gc_enable(FALSE) -> because the
+# console is not serial, that sets disableConsoleOutput = TRUE. Net effect: the
+# panel goes black and NOT ONE character of kernel output is ever painted, so
+# every version since v141 looked dead while the kernel kept running. That is
+# also why v146 (halted before arm_vm_init) stayed white and v145 ("no white")
+# did not: the fill was wiped by the progress screen.
+# Fix: right after kPEAcquireScreen, switch_to_video_console() +
+# initialize_screen(NULL, kPETextScreen) to bring the text console back, and
+# make kernel_bootstrap_log() print unconditionally so the bootstrap trace
+# names every subsystem the kernel enters.
+zzz-g0245d-v148-text-console.patch
+
+# G0245D v149 (hardware 2026-11-14): v148 still showed no text. The text console
+# needs gc_enabled + a rendered font + the right pixel format +
+# disableConsoleOutput == FALSE; any one failing makes a *live* kernel look like
+# a dead black panel, and we cannot tell those apart from a photo. This patch
+# adds a console-independent marker: g0245d_fb_mark(n) writes straight to
+# vinfo.v_baseaddr and memsets the FULL stride (v_rowbytes) to 0xFF, so the band
+# is white regardless of v_depth / v_width / fonts. Bands are cumulative
+# (mark(n) paints 1..n), so the number of white bars = highest mark reached:
+#   1 = entered initialize_screen with a mapped framebuffer (PE_create_console)
+#   2 = entered kernel_bootstrap_thread, before kPEAcquireScreen
+#   3 = survived kPEAcquireScreen + the text-console restore
+#   4 = survived vm_commpage_init / vm_commpage_text_init
+zzz-g0245d-v149-fb-marks.patch
+
+# G0245D v150 (hardware 2026-11-14): the v149 marks did not show on the photo,
+# but the display is vertically flipped (fb row 0 = bottom of the panel) and
+# v149 put them at fb rows 40..244, i.e. the last few percent of the panel, which
+# the photo cropped off. Move them to fb rows 1000..1360 (an area with no
+# pre-existing stripes) and raise the count to 5:
+#   1 = initialize_screen reached with a mapped framebuffer (PE_create_console)
+#   2 = kernel_bootstrap_thread, right before PE_init_iokit
+#   3 = just before kPEAcquireScreen (the call that clears the screen)
+#   4 = survived kPEAcquireScreen + text-console restore
+#   5 = survived vm_commpage_init / vm_commpage_text_init
+zzz-g0245d-v150-marks-visible.patch

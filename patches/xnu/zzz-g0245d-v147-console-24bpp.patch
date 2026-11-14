@@ -1,0 +1,86 @@
+diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
+index 05d887d..224f3d8 100644
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -1400,6 +1400,12 @@ vc_render_char(unsigned char ch, unsigned char *renderptr, short newdepth)
+ 				*current.shortptr++ = (*theChar & mask) ? 0xFFFF : 0;
+ 				break;
+ 
++			case 24:
++				/* G0245D v147: RGB888, 3 bytes per pixel (all-0xFF=white, 0=black) */
++				*current.charptr++ = (*theChar & mask) ? 0xFF : 0x00;
++				*current.charptr++ = (*theChar & mask) ? 0xFF : 0x00;
++				*current.charptr++ = (*theChar & mask) ? 0xFF : 0x00;
++				break;
+ 			case 30:
+ 			case 32:
+ 				*current.longptr++ = (*theChar & mask) ? 0xFFFFFFFF : 0;
+@@ -1611,6 +1617,40 @@ vc_paint_char_32(unsigned int xx, unsigned int yy, unsigned char ch, int attrs,
+ 	}
+ }
+ 
++/* G0245D v147: paint one 8x8 char at 24bpp RGB888 (3 bytes/pixel).
++ * White foreground / black background only - all bytes equal, so this is
++ * correct regardless of the RGB vs BGR byte order of the panel. */
++static void
++vc_paint_char_24(unsigned int xx, unsigned int yy, unsigned char ch, int attrs,
++    __unused unsigned char ch_previous, __unused int attrs_previous)
++{
++	unsigned char *theChar;
++	unsigned char *where;
++	int i;
++
++	if (vc_rendered_font) {
++		theChar = (unsigned char*)(vc_rendered_font + (ch * vc_rendered_char_size));
++	} else {
++		vc_render_char(ch, vc_rendered_char, 24);
++		theChar = (unsigned char*)(vc_rendered_char);
++	}
++	where = (unsigned char *)(vinfo.v_baseaddr +
++	    (yy * ISO_CHAR_HEIGHT * vinfo.v_rowbytes) +
++	    (xx * ISO_CHAR_WIDTH * 3));
++
++	for (i = 0; i < ISO_CHAR_HEIGHT; i++) {
++		unsigned char *store = where;
++		int x;
++		for (x = 0; x < 8; x++) {
++			unsigned char on = *theChar;   /* 0xFF set, 0x00 clear */
++			store[0] = store[1] = store[2] = on;
++			theChar += 3;
++			store += 3;
++		}
++		where += vinfo.v_rowbytes;
++	}
++}
++
+ static void
+ vc_paint_char(unsigned int xx, unsigned int yy, unsigned char ch, int attrs,
+     unsigned char ch_previous, int attrs_previous)
+@@ -1627,6 +1667,9 @@ vc_paint_char(unsigned int xx, unsigned int yy, unsigned char ch, int attrs,
+ 		vc_paint_char_16(xx, yy, ch, attrs, ch_previous,
+ 		    attrs_previous);
+ 		break;
++	case 24:
++		vc_paint_char_24(xx, yy, ch, attrs, ch_previous, attrs_previous);
++		break;
+ 	case 30:
+ 	case 32:
+ 		vc_paint_char_32(xx, yy, ch, attrs, ch_previous,
+diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
+index 0318f49..5a1c95a 100644
+--- a/pexpert/arm/pe_init.c
++++ b/pexpert/arm/pe_init.c
+@@ -444,6 +444,13 @@ PE_init_platform(boolean_t vm_initialized, void *args)
+ 				PE_state.video.v_width = g0245d_w;
+ 			}
+ 		}
++		/* G0245D v147: the panel is 24bpp RGB888. The boot shim reports
++		 * depth 32; force 24 so the video console takes the 24bpp path, and
++		 * derive v_width from the stride at 3 bytes/pixel (1080). */
++		PE_state.video.v_depth = 24;
++		if (PE_state.video.v_rowBytes) {
++			PE_state.video.v_width = PE_state.video.v_rowBytes / 3;
++		}
+ 		PE_state.video.v_rotate = (
+ 			((boot_args_ptr->Video.v_depth >> kBootVideoDepthRotateShift) & kBootVideoDepthMask) +    // rotation
+ 			((boot_args_ptr->Video.v_depth >> kBootVideoDepthBootRotateShift)  & kBootVideoDepthMask) // add extra boot rotation
