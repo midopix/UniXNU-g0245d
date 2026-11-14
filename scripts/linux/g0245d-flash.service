@@ -1,0 +1,14 @@
+[Unit]
+Description=G0245D device-driven auto-flash watcher (WorkBuddy sandbox bypass)
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash /home/myth/WorkBuddy/2026-11-12-19-08-50/g0245d/linux/flash-watcher.sh
+Restart=always
+RestartSec=3
+StandardOutput=append:/home/myth/WorkBuddy/2026-11-12-19-08-50/g0245d/linux/.flash-watcher.log
+StandardError=append:/home/myth/WorkBuddy/2026-11-12-19-08-50/g0245d/linux/.flash-watcher.log
+
+[Install]
+WantedBy=default.target

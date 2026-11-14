@@ -1,0 +1,54 @@
+diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
+index 65974fe..ea33416 100644
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -3388,9 +3388,9 @@ g0245d_fb_mark(int n)
+ 	width = vinfo.v_rowbytes;
+ 
+ 	for (i = 0; i < (unsigned int)n; i++) {
+-		unsigned int y0 = 40 + i * 60;
++		unsigned int y0 = 1000 + i * 80;
+ 
+-		for (y = y0; (y < (y0 + 24)) && (y < vinfo.v_height); y++) {
++		for (y = y0; (y < (y0 + 40)) && (y < vinfo.v_height); y++) {
+ 			memset(base + (unsigned long)y * width, 0xFF, width);
+ 		}
+ 	}
+diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
+index 564b91e..1dd00c6 100644
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -697,6 +697,7 @@ kernel_bootstrap_thread(void)
+ 
+ #ifdef  IOKIT
+ 	kernel_bootstrap_log("PE_init_iokit");
++	g0245d_fb_mark(2);
+ 	PE_init_iokit();
+ #endif
+ 
+@@ -717,7 +718,7 @@ kernel_bootstrap_thread(void)
+ 	/*
+ 	 * This will start displaying progress to the user, start as early as possible
+ 	 */
+-	g0245d_fb_mark(2);
++	g0245d_fb_mark(3);
+ 	initialize_screen(NULL, kPEAcquireScreen);
+ 
+ 	/*
+@@ -735,14 +736,14 @@ kernel_bootstrap_thread(void)
+ 	 */
+ 	switch_to_video_console();
+ 	initialize_screen(NULL, kPETextScreen);
+-	g0245d_fb_mark(3);
++	g0245d_fb_mark(4);
+ 
+ 	/*
+ 	 *	Initialize the shared region module.
+ 	 */
+ 	vm_commpage_init();
+ 	vm_commpage_text_init();
+-	g0245d_fb_mark(4);
++	g0245d_fb_mark(5);
+ 
+ #if CONFIG_MACF
+ 	kernel_bootstrap_log("mac_policy_initmach");

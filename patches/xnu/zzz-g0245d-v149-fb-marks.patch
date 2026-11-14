@@ -1,0 +1,102 @@
+diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
+index 224f3d8..65974fe 100644
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -2836,6 +2836,8 @@ vc_initialize(__unused struct vc_info * vinfo_p)
+ 	}
+ }
+ 
++void g0245d_fb_mark(int n);
++
+ void
+ initialize_screen(PE_Video * boot_vinfo, unsigned int op)
+ {
+@@ -2947,6 +2949,10 @@ initialize_screen(PE_Video * boot_vinfo, unsigned int op)
+ 			vinfo = new_vinfo;
+ 		}
+ 
++		/* G0245D v149: vinfo now holds a mapped framebuffer address - paint a
++		 * band straight into it, without going through the text console. */
++		g0245d_fb_mark(1);
++
+ 		// If we changed the virtual address, remove the old mapping
+ 		if (newVideoVirt != 0) {
+ 			if (lastVideoVirt && lastVideoMapSize) {                                                /* Was the framebuffer mapped before? */
+@@ -3352,3 +3358,40 @@ vc_set_progressmeter(int new_value)
+ }
+ 
+ #endif /* defined(XNU_TARGET_OS_OSX) */
++
++
++/*
++ * G0245D v149: console-independent framebuffer progress marker.
++ *
++ * Diagnosis only. Everything the kernel tried to print so far went through the
++ * video console, which needs gc_enabled, a rendered font, the right pixel format
++ * and disableConsoleOutput == FALSE - any one of those failing makes a live
++ * kernel look like a dead black panel. This helper writes straight to the
++ * framebuffer address the console itself uses (vinfo.v_baseaddr, mapped by
++ * ml_io_map_unmappable) and fills each band across the FULL stride, so the
++ * result is visible no matter what v_depth / v_width say.
++ *
++ * Bands are painted cumulatively: g0245d_fb_mark(n) draws bands 1..n, so the
++ * number of white bars on screen is the highest mark the kernel reached.
++ */
++void
++g0245d_fb_mark(int n)
++{
++	unsigned char *base;
++	unsigned int   i, y, width;
++
++	if ((vinfo.v_baseaddr == 0) || (vinfo.v_rowbytes == 0) || (vinfo.v_height == 0)) {
++		return;
++	}
++
++	base  = (unsigned char *)(uintptr_t)vinfo.v_baseaddr;
++	width = vinfo.v_rowbytes;
++
++	for (i = 0; i < (unsigned int)n; i++) {
++		unsigned int y0 = 40 + i * 60;
++
++		for (y = y0; (y < (y0 + 24)) && (y < vinfo.v_height); y++) {
++			memset(base + (unsigned long)y * width, 0xFF, width);
++		}
++	}
++}
+diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
+index 52542b3..564b91e 100644
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -118,6 +118,9 @@
+ #include <machine/machine_routines.h>
+ #include <libkern/version.h>
+ #include <pexpert/device_tree.h>
++
++/* G0245D v149: framebuffer progress marker (see video_console.c) */
++extern void g0245d_fb_mark(int n);
+ #include <sys/codesign.h>
+ #include <sys/kdebug.h>
+ #include <sys/random.h>
+@@ -714,6 +717,7 @@ kernel_bootstrap_thread(void)
+ 	/*
+ 	 * This will start displaying progress to the user, start as early as possible
+ 	 */
++	g0245d_fb_mark(2);
+ 	initialize_screen(NULL, kPEAcquireScreen);
+ 
+ 	/*
+@@ -731,12 +735,14 @@ kernel_bootstrap_thread(void)
+ 	 */
+ 	switch_to_video_console();
+ 	initialize_screen(NULL, kPETextScreen);
++	g0245d_fb_mark(3);
+ 
+ 	/*
+ 	 *	Initialize the shared region module.
+ 	 */
+ 	vm_commpage_init();
+ 	vm_commpage_text_init();
++	g0245d_fb_mark(4);
+ 
+ #if CONFIG_MACF
+ 	kernel_bootstrap_log("mac_policy_initmach");

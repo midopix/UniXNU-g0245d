@@ -299,3 +299,76 @@ stage 19 已跑过；HAS_BP_RET 未定义被编出）。
   重画保证链条完整）。判读 `analyze_bands_native.py`：**K = 最高带号 − 12**（K=9 → 带 21，
   K=22 → 带 34；链条已放宽到 0.48H 跨度）。
 - 构建脚本 `linux/build-v140-all.sh`；patch `zzz-g0245d-v140-band-stages.patch`。
+
+## 十二、v140 → v150 的一整轮排查（2026-11-14 下午）
+
+这一节记录一次**方向性纠错**：连续十版看到的"白条闪一下就黑屏"，前期被误读成"死在 console 附近"，
+实际是**内核早就跑过 `arm_init` 了**，只是屏幕输出被主动关掉。
+
+### 12.1 逐版事实
+
+| 版 | 关键改动 | 实机结果 |
+|---|---|---|
+| v140 | 退役颜色编码，恢复 v137 白带几何，第三组带梯扩到 26..34，`g0245d_mark_vm()` 每次重画 13..index | 只有 13..21 亮，**22..34 一条不亮**，且**没有品红**；白带 + 引导器菜单**一直留在屏上** |
+| v141 | 停用 v140 的 physmap 描带；`pe_init.c` 把 `v_width` 归一化为 `v_rowBytes/(v_depth>>3)` | 白条闪一下 → 黑屏，无字 |
+| v142 | `video_console.c` 加 `g0245d_vc_paint()`，用 `vinfo.v_baseaddr` 在 console 之后补画白带 | 仍黑 |
+| v143 | `PE_create_console()` 之后强制 `switch_to_video_console()` | 仍黑 |
+| v144 | `initialize_screen` 里对低地址（<2^48）强制 `makeMapping = TRUE`，走 `ml_io_map_unmappable` | 仍黑 |
+| v145 | `arm_vm_init()` 之前把整个 fb 填纯白 | **"没白"** |
+| v146 | 填白之后 `wfe` 死循环（仍在 `arm_vm_init` 之前） | **纯白定格** |
+| v147 | `vc_render_char` 加 `case 24`、新增 `vc_paint_char_24`、`pe_init` 强制 `v_depth=24` | 仍黑，无字 |
+| v148 | `startup.c` 在 `initialize_screen(NULL, kPEAcquireScreen)` 之后强制 `kPETextScreen`；`kernel_bootstrap_log` 无条件打印 | 仍黑，无字 |
+| v149 | `g0245d_fb_mark(n)`：完全绕过 console，直接写 `vinfo.v_baseaddr`、按整行 stride 填 0xFF | 照片上未见横杠（但**屏幕底边被裁**，见 12.3） |
+| v150 | 标记挪到 fb 行 1000/1080/1160/1240/1320（高 40 行），共 5 个 | 待判读 |
+
+### 12.2 由此确定的结论
+
+1. **v146 是分水岭**：`arm_vm_init()` **之前**填的整屏白能稳定显示 ⇒ **写 fb 能到达面板、
+   MDP5 一直在扫描、面板没被关**。所以 v139–v145 的所有"黑屏"都不是硬件问题。
+2. **v140 反证 `g0245d_paint_stage_vm`（physmap 描带）会 fault**：它以
+   `gVirtBase + (fb_pa - gPhysBase)` 取地址（等价 `phystokv`），而 `phystokv` 要求
+   `gPhysBase <= pa < gPhysBase + real_phys_size`，fb 在实际跑起来的位置**不满足**这个窗口
+   （或 physmap 尚未覆盖），于是写入即 fault → 停在带 21/22，白带**冻在屏上**。
+   **别再直接用 phystokv 访问 fb；要么走 `ml_io_map_unmappable`，要么用 console 的 `vinfo.v_baseaddr`。**
+3. **`machine_startup` 会主动关掉屏幕文字**（`startup.c` 里 `initialize_screen(NULL, kPEAcquireScreen)`）：
+   - `vc_progress_set(graphics_now=TRUE, delay)` → 画进度画面、把 fb 擦成黑；
+   - `gc_enable(!graphics_now)` = `gc_enable(FALSE)` → 因为 `console_is_serial()==FALSE`，
+     置 **`disableConsoleOutput = TRUE`**、`gc_enabled = FALSE`；
+   - `gc_acquired = TRUE`。
+   ⇒ 从这一刻起 **任何 `kprintf` 都不会画到屏上**（`serial_console.c` 的 `_cnputs()` 一进门就 return）。
+   这就是"白条只闪一帧然后全黑"的直接原因。
+4. **`arm_init` 期间的 kprintf 同样不可见**：`vc_putc` 的守卫是
+   `gc_enabled || !gc_acquired || !gc_graphics_boot`，而 `gc_acquired` 只在 `kPEAcquireScreen`
+   里才置 TRUE，所以图形模式下 `PE_create_console()` 之后到 `machine_startup` 之前，画不出任何字。
+5. 已排除的清屏嫌疑点（都不成立，别再查）：
+   - `PE_create_console()` **不清屏**；`vc_initialize()` 只算 rows/columns/rowscanbytes；
+   - `check_for_panic_log()` 需要 DT `pram` 节点，本机没有 → 直接 return，**不会 bzero**；
+   - `PE_init_printf(TRUE)` → `vcattach()` 只在 `gc_graphics_boot == FALSE` 时才 replay，图形模式无动作；
+   - `switch_to_video_console()` 是**无条件** `cons_ops_index = VC_CONS_OPS`，v143 的路由确实生效；
+   - `PE_create_console()` 传的是 `&PE_state.video`，所以 `pe_init.c` 里改的 `v_depth` / 强制映射
+     都真的进了 `initialize_screen`。
+
+### 12.3 显示几何（实机标定，务必按这个来）
+
+引导器日志（放大照片读准）：
+
+```
+DARWINBOOT: video base=0x83401000 display=1 row=3240 width=1000 height=1920 depth=24
+DARWINBOOT: command line: -v serial=3 console=ttyHSL0,115200,n8
+```
+
+- **`depth` 本来就是 24**（曾误读为 32）；`v147` 强制 24 是冗余动作，无害但无效。
+- **`width=1000` 是引导器报错的**：`3240 / 3 = 1080` 才是真实列数。`v141` 的归一化方向正确。
+- **显示是垂直翻转的**：用已知带位置标定出 `y ≈ 2052 − 0.935 × fb_row`（照片像素坐标），
+  即 **fb 第 0 行在屏幕最底部**。因此：
+  - 主带 0..7（fb 行 200..648）出现在屏幕中下部；
+  - 细带 13..21（fb 行 700..956）出现在它们**上方**。
+- **拍照务必把整块屏幕（含上下边缘）拍全**，否则贴在 fb 低行号的标记会被裁掉——v149 就是这么白丢一轮的。
+
+### 12.4 下一步
+
+- 判读 v150 的横杠条数（`1..5`，见 `zzz-g0245d-v150-marks-visible.patch` 里的注释），据此确定
+  内核是停在 `PE_create_console`、`kPEAcquireScreen`、还是 `vm_commpage_init`。
+- 若条数 ≥ 4 说明已经越过清屏点，那"没字"就纯粹是 console 渲染/格式问题，需要在
+  `gc_enable(TRUE)` 之后确认 `gc_enabled`、字模与 `v_baseaddr` 三者都成立。
+- 若条数为 0 或 1，则应把注意力放回 `arm_init` 的后半段（`serial_init` / `PE_create_console`）。

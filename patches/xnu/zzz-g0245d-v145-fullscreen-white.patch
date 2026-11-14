@@ -1,0 +1,24 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+index 6a87ed0..c9ccd40 100644
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -611,6 +611,19 @@ arm_init(
+ 
+ 	g0245d_paint_stage(21);   /* v136: at the arm_vm_init() call site */
+ 
++	{
++		/* G0245D v145: right before arm_vm_init (bootstrap VA still valid),
++		 * fill the WHOLE framebuffer solid white (VA 0xC3401000 -> PA
++		 * 0x83401000, stride 3240, height 1920). If the panel is still on
++		 * after arm_vm_init the screen stays bright white; if it goes black
++		 * the display/backlight itself is turned off (not an fb content
++		 * problem), and no amount of fb writing can show. */
++		volatile uint32_t *g0245d_fb = (volatile uint32_t *)(uintptr_t)0xC3401000UL;
++		unsigned long g0245d_n = (3240UL * 1920UL) / 4UL, g0245d_i;
++		for (g0245d_i = 0; g0245d_i < g0245d_n; g0245d_i++) {
++			g0245d_fb[g0245d_i] = 0xFFFFFFFFu;
++		}
++	}
+ 	arm_vm_init(xmaxmem, args);
+ 
+ 	if (debug_boot_arg) {
