@@ -285,13 +285,13 @@ zzz-g0245d-v137-maxmem-path.patch
 # Hardware result (2026-11-13): the kernel no longer freezes; the BootShim log is
 # complete, 4 inputs validate, boot services exit - and then the screen goes
 # BLACK. So the PAN root cause is confirmed and XNU runs well past arm_init().
-# v139: replace the band painters with full-screen colour stages. Bands cannot
-# express "which of the last few stages" once the kernel is that far along, and a
-# band needs its geometry validated against the panel each time; one flat colour
-# per stage is unambiguous in a single photo:
-#   yellow = before arm_vm_init   red   = inside arm_vm_init
-#   green  = serial_init          blue  = PE_create_console()
-#   white  = just before machine_startup   black = later still
-# The fill routine writes 3 bytes per pixel (B,G,R): this panel is RGB888 /
-# 24bpp, so 32-bit fills would render as yellow/magenta/cyan stripes.
-zzz-g0245d-v139-color-stages.patch
+# v139 hardware result: the stage-24 WHITE BAND was visible at 45% screen
+# height (PE_create_console returned), but the flat blue fill was overwritten
+# by the vc console with a mismatched pixel format - magenta grid texture.
+# A colour fill dies to any console rewrite; an all-0xFF band reads white
+# under every pixel format. So v140 returns to the v137 band geometry
+# (rowbytes 0xCA8) with the band ladder extended to 26..34:
+#   26 PE_init_printf   27 cpu_machine_idle_init  28 PE_init_platform
+#   29 ml_map_cpu_pio   30 cpu_timebase_init      31 kptimer_curcpu_up
+#   32 PE_init_cpu      33 fiq_context_init       34 DT dram-base/size
+zzz-g0245d-v140-band-stages.patch

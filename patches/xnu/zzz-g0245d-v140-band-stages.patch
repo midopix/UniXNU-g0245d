@@ -1,8 +1,6 @@
-diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
-index 8fe43b6..bcd7b11 100644
 --- a/osfmk/arm/arm_init.c
 +++ b/osfmk/arm/arm_init.c
-@@ -187,6 +187,114 @@ SECURITY_READ_ONLY_LATE(bool) enable_processor_exit = false;
+@@ -187,6 +187,82 @@
   */
  void arm_init(boot_args * args);
  
@@ -35,60 +33,27 @@ index 8fe43b6..bcd7b11 100644
 +}
 +
 +/*
-+ * g0245d v139: color-coded stage marks.
++ * g0245d v140: white-band stage marks (v139's colour coding retired).
 + *
-+ * v138 (PAN off) no longer freezes on a painted band - the screen goes BLACK
-+ * after handoff. That is ambiguous: either XNU still dies earlier (nothing
-+ * painted), or it ran much further and something (PE_create_console / vc)
-+ * cleared the framebuffer. The cumulative band scheme cannot tell the two
-+ * apart, so repaint the WHOLE framebuffer with one solid colour per stage:
-+ * whatever colour stays on screen is the last stage that actually executed,
-+ * and a fully black screen then means "went past the final mark".
++ * The v139 photo answered two questions at once. The white band of stage 24
++ * (fb row 1052) WAS on screen at 45% height - so PE_create_console() had
++ * returned - but the flat blue fill had been replaced by a magenta grid
++ * texture: the vc console rewrites the framebuffer with a pixel format that
++ * does not match this panel, and any colour fill is destroyed by it. A band
++ * painted with all-0xFF bytes reads as white under EVERY pixel format, so
++ * the band geometry (rowbytes 0xCA8, verified by v137's photo) is the only
++ * trustworthy channel. Each stage paints one white band; bands accumulate,
++ * the highest-numbered band on screen names the stage.
 + *
-+ *   21 = yellow   (just before arm_vm_init(), still on bootstrap VA)
-+ *   22 = red      (arm_vm_init returned)
-+ *   23 = green    (serial_init returned)
-+ *   24 = blue     (PE_create_console returned)
-+ *   25 = white    (about to enter machine_startup)
++ *   21 arm_vm_init call site   22 arm_vm_init returned    23 serial_init
++ *   24 PE_create_console       25 before machine_startup
++ *   26 PE_init_printf          27 cpu_machine_idle_init   28 PE_init_platform
++ *   29 ml_map_cpu_pio          30 cpu_timebase_init       31 kptimer_curcpu_up
++ *   32 PE_init_cpu             33 fiq_context_init        34 DT dram-base/size
 + */
 +#define G0245D_FB_PA        0x83401000ULL
 +#define G0245D_FB_ROWBYTES  0xCA8ULL
 +#define G0245D_FB_ROWS      1920ULL
-+
-+/*
-+ * NOTE: the panel is RGB888 (24bpp, 3 bytes per pixel), NOT 32bpp. Writing
-+ * 32-bit words only looks right for white (all 0xFF); for any other colour the
-+ * extra byte shifts the pixel grid and the screen shows a cycling
-+ * yellow/magenta/cyan stripe pattern instead of a solid colour. So fill one
-+ * 3-byte (B,G,R) triplet per pixel.
-+ */
-+static void
-+g0245d_fill_fb(uint64_t fb_va, uint32_t color)
-+{
-+	uint8_t *p = (uint8_t *)(uintptr_t)fb_va;
-+	uint8_t  b = (uint8_t)(color & 0xFFu);
-+	uint8_t  g = (uint8_t)((color >> 8) & 0xFFu);
-+	uint8_t  r = (uint8_t)((color >> 16) & 0xFFu);
-+	uint64_t n = (G0245D_FB_ROWS * G0245D_FB_ROWBYTES) / 3;
-+
-+	while (n--) {
-+		*p++ = b;
-+		*p++ = g;
-+		*p++ = r;
-+	}
-+}
-+
-+static uint32_t
-+g0245d_stage_color(int index)
-+{
-+	switch (index) {
-+	case 21: return 0xFFFFFF00u;  /* yellow */
-+	case 22: return 0xFFFF0000u;  /* red    */
-+	case 23: return 0xFF00FF00u;  /* green  */
-+	case 24: return 0xFF0000FFu;  /* blue   */
-+	default: return 0xFFFFFFFFu;  /* white  */
-+	}
-+}
 +
 +/* Before arm_vm_init(): framebuffer lives at its bootstrap VA (V=P window). */
 +static void
@@ -96,28 +61,29 @@ index 8fe43b6..bcd7b11 100644
 +{
 +	extern void g0245d_paint_stage(int index);
 +
-+	g0245d_fill_fb(0xC3401000ULL, g0245d_stage_color(index));
 +	g0245d_paint_stage(index);
 +}
 +
-+/* After arm_vm_init(): reach the framebuffer through the kernel physmap. */
++/* After arm_vm_init(): reach the framebuffer through the kernel physmap.
++ * Repaints the whole ladder 13..index: band 21 was painted pre-vm_init on
++ * the bootstrap VA and the vc console clear erases it, and later console
++ * text can punch holes into any band. Repainting keeps the ladder complete
++ * so the read-out stays a continuous chain. */
 +static void
 +g0245d_mark_vm(int index)
 +{
-+	extern vm_offset_t gVirtBase;
-+	extern vm_offset_t gPhysBase;
-+	uint64_t va;
++	int i;
 +
-+	va = (uint64_t)gVirtBase + (G0245D_FB_PA - (uint64_t)gPhysBase);
-+	g0245d_fill_fb(va, g0245d_stage_color(index));
-+	g0245d_paint_stage_vm(index);
++	for (i = 13; i <= index; i++) {
++		g0245d_paint_stage_vm(i);
++	}
 +}
 +
 +
  #if __arm64__
  unsigned int page_shift_user32; /* for page_size as seen by a 32-bit task */
  
-@@ -347,16 +455,27 @@ arm_init(
+@@ -347,16 +423,27 @@
  	boot_args       *args)
  {
  	unsigned int    maxmem;
@@ -146,7 +112,7 @@ index 8fe43b6..bcd7b11 100644
  	/* If kernel integrity is supported, use a constant copy of the boot args. */
  	const_boot_args = *args;
  	BootArgs = args = &const_boot_args;
-@@ -371,12 +490,21 @@ arm_init(
+@@ -371,12 +458,21 @@
  	PE_init_platform(FALSE, args); /* Get platform expert set up */
  
  #if __arm64__
@@ -168,7 +134,7 @@ index 8fe43b6..bcd7b11 100644
  
  #if (DEVELOPMENT || DEBUG)
  	unsigned long const *platform_stall_ptr = NULL;
-@@ -399,6 +527,10 @@ arm_init(
+@@ -399,6 +495,10 @@
  
  
  	{
@@ -179,7 +145,7 @@ index 8fe43b6..bcd7b11 100644
  		/*
  		 * Select the advertised kernel page size.
  		 */
-@@ -417,8 +549,14 @@ arm_init(
+@@ -417,8 +517,14 @@
  			PAGE_SHIFT_CONST = ARM_PGSHIFT;
  		}
  
@@ -194,7 +160,7 @@ index 8fe43b6..bcd7b11 100644
  #ifdef  APPLETYPHOON
  		if (PE_parse_boot_argn("cpus_defeatures", &cpus_defeatures, sizeof(cpus_defeatures))) {
  			if ((cpus_defeatures & 0xF) != 0) {
-@@ -447,10 +585,11 @@ arm_init(
+@@ -447,10 +553,11 @@
  	    - (uintptr_t)(args->virtBase)));
  
  	thread = thread_bootstrap();
@@ -207,7 +173,7 @@ index 8fe43b6..bcd7b11 100644
  	/*
  	 * Preemption is enabled for this thread so that it can lock mutexes without
  	 * tripping the preemption check. In reality scheduling is not enabled until
-@@ -460,11 +599,25 @@ arm_init(
+@@ -460,11 +567,25 @@
  	thread->machine.preemption_count = 0;
  	cpu_bootstrap();
  
@@ -233,7 +199,7 @@ index 8fe43b6..bcd7b11 100644
  	/*
  	 * Initialize the timer callout world
  	 */
-@@ -474,13 +627,27 @@ arm_init(
+@@ -474,13 +595,27 @@
  
  	processor_bootstrap();
  
@@ -263,7 +229,7 @@ index 8fe43b6..bcd7b11 100644
  
  #if SCHED_HYGIENE_DEBUG
  	{
-@@ -508,6 +675,8 @@ arm_init(
+@@ -508,6 +643,8 @@
  
  	nanoseconds_to_absolutetime(XCALL_ACK_TIMEOUT_NS, &xcall_ack_timeout_abstime);
  
@@ -272,44 +238,95 @@ index 8fe43b6..bcd7b11 100644
  #if HAS_BP_RET
  	PE_parse_boot_argn("bpret", &bp_ret, sizeof(bp_ret));
  	set_bp_ret(); // Apply branch predictor retention settings to boot CPU
-@@ -519,8 +688,13 @@ arm_init(
+@@ -519,8 +656,13 @@
  	__builtin_arm_wsr("pan", 1);
  #endif  /* __ARM_PAN_AVAILABLE__ */
  
 +	g0245d_paint_stage(21);   /* v136: at the arm_vm_init() call site */
-+	g0245d_mark_va(21);       /* v139: YELLOW - entering arm_vm_init() */
++	g0245d_mark_va(21);       /* v140: band 21 - at the arm_vm_init() call site */
 +
  	arm_vm_init(xmaxmem, args);
  
-+	g0245d_mark_vm(22);       /* v139: RED - arm_vm_init() returned */
++	g0245d_mark_vm(22);       /* v140: band 22 - arm_vm_init() returned */
 +
  	if (debug_boot_arg) {
  		patch_low_glo();
  	}
-@@ -533,6 +707,9 @@ arm_init(
+@@ -533,6 +675,9 @@
  
  	/* Setup debugging output. */
  	const unsigned int serial_exists = serial_init();
 +
-+	g0245d_mark_vm(23);       /* v139: GREEN - serial_init() returned */
++	g0245d_mark_vm(23);       /* v140: band 23 - serial_init() returned */
 +
  	kernel_startup_initialize_upto(STARTUP_SUB_KPRINTF);
  	kprintf("kprintf initialized\n");
  
-@@ -576,6 +753,8 @@ arm_init(
+@@ -576,9 +721,13 @@
  	}
  	PE_create_console();
  
-+	g0245d_mark_vm(24);       /* v139: BLUE - console created (vc may have cleared the screen) */
++	g0245d_mark_vm(24);       /* v140: band 24 - console created (v139 proved this band visible) */
 +
  	/* setup console output */
  	PE_init_printf(FALSE);
  
-@@ -653,6 +832,8 @@ arm_init(
++	g0245d_mark_vm(26);       /* v140: band 26 - PE_init_printf returned */
++
+ #if __arm64__
+ #if DEBUG
+ 	dump_kva_space();
+@@ -586,8 +735,10 @@
+ #endif
+ 
+ 	cpu_machine_idle_init(TRUE);
++	g0245d_mark_vm(27);       /* v140: band 27 - cpu_machine_idle_init returned */
+ 
+ 	PE_init_platform(TRUE, &BootCpuData);
++	g0245d_mark_vm(28);       /* v140: band 28 - PE_init_platform returned */
+ 
+ #if __arm64__
+ 	extern bool cpu_config_correct;
+@@ -596,6 +747,7 @@
+ 	}
+ 
+ 	ml_map_cpu_pio();
++	g0245d_mark_vm(29);       /* v140: band 29 - ml_map_cpu_pio returned */
+ 
+ #if APPLE_ARM64_ARCH_FAMILY
+ 	configure_late_apple_regs(true);
+@@ -604,14 +756,18 @@
+ #endif
+ 
+ 	cpu_timebase_init(TRUE);
++	g0245d_mark_vm(30);       /* v140: band 30 - cpu_timebase_init returned */
+ 
+ #if KPERF
+ 	/* kptimer_curcpu_up() must be called after cpu_timebase_init */
+ 	kptimer_curcpu_up();
++	g0245d_mark_vm(31);       /* v140: band 31 - kptimer_curcpu_up returned */
+ #endif /* KPERF */
+ 
+ 	PE_init_cpu();
++	g0245d_mark_vm(32);       /* v140: band 32 - PE_init_cpu returned */
+ 	fiq_context_init(TRUE);
++	g0245d_mark_vm(33);       /* v140: band 33 - fiq_context_init returned */
+ 
+ 
+ #if HIBERNATION
+@@ -640,6 +796,7 @@
+ 
+ 	gDramBase = *dram_base;
+ 	gDramSize = *dram_size;
++	g0245d_mark_vm(34);       /* v140: band 34 - DT dram-base/size read */
+ 
+ 	/*
+ 	 * Initialize the stack protector for all future calls
+@@ -653,6 +810,8 @@
  	 * against string vulnerabilities
  	 */
  	__stack_chk_guard &= ~(0xFFULL << 8);
-+	g0245d_mark_vm(25);       /* v139: WHITE - entering machine_startup() */
++	g0245d_mark_vm(25);       /* v140: band 25 - entering machine_startup() */
 +
  	machine_startup(args);
  }
