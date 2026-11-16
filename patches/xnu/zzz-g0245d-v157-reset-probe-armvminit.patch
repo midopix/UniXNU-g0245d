@@ -1,0 +1,45 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -613,27 +613,20 @@
+ 
+ 	arm_vm_init(xmaxmem, args);
+ 
+-	/* G0245D v156: the splash framebuffer @0x83401000 is a reserved region and
+-	 * is NOT in the bootstrap physmap, so writing gVirtBase+pa-gPhysBase faults
+-	 * (that is why every physmap paint + the console stayed black). Now that
+-	 * arm_vm_init/pmap_bootstrap has run, map the splash pages into the physmap
+-	 * VA with pmap_map_bd(), then fill the panel white and halt - a point we are
+-	 * certain is reached, so white proves the mapping now works. */
+-	{
+-		extern vm_map_address_t pmap_map_bd(vm_map_address_t virt, vm_offset_t start,
+-		    vm_offset_t end, vm_prot_t prot);
+-		extern vm_offset_t gVirtBase;
+-		extern vm_offset_t gPhysBase;
+-		extern void g0245d_fb_block(int r0, int r1);
+-		extern void g0245d_halt(void);
+-		const vm_offset_t fb_pa = 0x83401000;
+-		const vm_offset_t fb_sz = 0x23ff000;
+-		vm_offset_t fb_va = gVirtBase + (fb_pa - gPhysBase);
+-
+-		pmap_map_bd(fb_va, fb_pa, fb_pa + fb_sz, VM_PROT_READ | VM_PROT_WRITE);
+-		g0245d_fb_block(0, 1920);
+-		g0245d_halt();
+-	}
++	/* G0245D v157: PSCI SYSTEM_RESET probe (no display, no serial needed).
++	 * If the device REBOOTS (loader reappears / keeps looping), the kernel
++	 * completed arm_vm_init and executed this. A static black/frozen screen
++	 * means we never got here (or the reset conduit is dead). This is the
++	 * ground-truth signal we could not get from the framebuffer. */
++	__asm__ __volatile__(
++		"movz w0, #0x0009\n\t"
++		"movk w0, #0x8400, lsl #16\n\t"
++		"mov x1, xzr\n\t"
++		"mov x2, xzr\n\t"
++		"mov x3, xzr\n\t"
++		"smc #0\n"
++		"1:\twfe\n\tb 1b\n"
++		::: "x0", "x1", "x2", "x3", "memory");
+ 
+ 	if (debug_boot_arg) {
+ 		patch_low_glo();

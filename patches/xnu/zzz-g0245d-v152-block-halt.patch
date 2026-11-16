@@ -1,0 +1,60 @@
+diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -3397,3 +3397,34 @@
+ 		}
+ 	}
+ }
++
++/*
++ * G0245D v152: fill fb rows [r0, r1) with solid white through the physmap, so
++ * the result is a big unmistakable block (unlike the thin v151 bars). Used with
++ * g0245d_halt() to freeze the post-kPEAcquireScreen state on the panel.
++ */
++void
++g0245d_fb_block(int r0, int r1)
++{
++	const uint64_t fb_pa    = 0x83401000ULL;
++	const uint64_t rowbytes = 0xCA8ULL;   /* 1080 px * 3 bytes (24bpp) */
++	uint64_t       va       = (uint64_t)gVirtBase + (fb_pa - (uint64_t)gPhysBase);
++	int            y;
++
++	for (y = r0; y < r1; y++) {
++		unsigned char *p = (unsigned char *)(uintptr_t)(va + (uint64_t)y * rowbytes);
++		uint64_t       k;
++
++		for (k = 0; k < rowbytes; k++) {
++			p[k] = 0xFF;
++		}
++	}
++}
++
++/* G0245D v152: hard stop - mask all interrupts and spin, so the last drawn
++ * frame stays on the panel for a photo. */
++void
++g0245d_halt(void)
++{
++	__asm__ __volatile__("msr daifset, #0xf\n1:\tb 1b" ::: "memory");
++}
+diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -121,6 +121,9 @@
+ 
+ /* G0245D v149: framebuffer progress marker (see video_console.c) */
+ extern void g0245d_fb_mark(int n);
++/* G0245D v152: solid-block filler + hard halt (see video_console.c) */
++extern void g0245d_fb_block(int r0, int r1);
++extern void g0245d_halt(void);
+ #include <sys/codesign.h>
+ #include <sys/kdebug.h>
+ #include <sys/random.h>
+@@ -721,6 +724,8 @@
+ 	g0245d_fb_mark(2);
+ 	initialize_screen(NULL, kPEAcquireScreen);
+ 	g0245d_fb_mark(3);	/* v151: drawn AFTER the kPEAcquireScreen clear */
++	g0245d_fb_block(600, 1400);	/* v152: big white block if we survived the clear */
++	g0245d_halt();			/* v152: freeze here so a photo can see it */
+ 
+ 	/*
+ 	 * G0245D v148: the kPEAcquireScreen call above brings up the graphics

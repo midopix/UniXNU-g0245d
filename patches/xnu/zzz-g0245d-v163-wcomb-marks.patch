@@ -1,0 +1,144 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -658,54 +658,23 @@
+ 	arm_vm_init(xmaxmem, args);
+ 
+ 	/*
+-	 * G0245D v162: rebuild a usable mapping after the TTBR0 swap.
++	 * G0245D v163: drop the pmap_map_bd attempt - it did not work and the
++	 * reason is now clear from the source. pmap_map_bd() resolves to
++	 * PMAP_MAP_BD_DEVICE -> CACHE_ATTRINDX_DISABLE and, more importantly, it
++	 * will not override a mapping that already exists. The physmap range for
++	 * this framebuffer was already built by arm_vm_page_granular_prot() as
++	 * Normal cacheable, so the call was a no-op and the stores still landed
++	 * in cache where MDP5's DMA could never see them.
+ 	 *
+-	 * v161 settled the question decisively: flooding rows 200..680 white
+-	 * BEFORE arm_vm_init painted a solid block on the panel (photo proof), and
+-	 * the same flood in black AFTER it changed nothing. So the loader V=P
+-	 * window at 0xC3401000 - the only mapping that ever reached this panel -
+-	 * dies in arm_vm_init, and everything after it needs a mapping we build
+-	 * ourselves.
++	 * The real fix lives in g0245d_fb_mark() (osfmk/console/video_console.c):
++	 * ml_io_map_wcomb() carves a FRESH mapping in kernel_map with
++	 * CACHE_ATTRINDX_WRITECOMB, i.e. non-cacheable write-combining, which is
++	 * exactly what a DMA-fed framebuffer needs. That needs kernel_map, so it
++	 * has to be called from machine_startup rather than here.
+ 	 *
+-	 * v156 tried pmap_map_bd but then painted through the ml_io_map address
+-	 * instead of the physmap address it had just mapped, so the mapping was
+-	 * never actually exercised. v162 maps the splash range and paints through
+-	 * EXACTLY that VA, then flushes the data cache, because physmap is Normal
+-	 * cacheable while the panel is fed by MDP5 DMA straight out of DRAM - the
+-	 * stores would otherwise sit in cache and MDP5 would never see them.
+-	 *
+-	 * Two blocks will be on screen if this works:
+-	 *   rows 200..680  white  (v161 step 1 - proof we reached arm_vm_init)
+-	 *   rows 700..972  white  (v162 - proof physmap now reaches the panel)
+-	 * Only the lower block means the mapping still fails.
++	 * The white block painted above (rows 200..680, before arm_vm_init) stays
++	 * as the "we reached arm_init" reference.
+ 	 */
+-	{
+-		extern vm_map_address_t pmap_map_bd(vm_map_address_t va, vm_offset_t sa,
+-		    vm_offset_t ea, vm_prot_t prot);
+-		extern void FlushPoC_DcacheRegion(vm_offset_t va, size_t length);
+-		extern unsigned long gVirtBase;
+-		extern unsigned long gPhysBase;
+-		const unsigned long fb_pa = 0x83401000UL;
+-		const unsigned long fb_sz = 0x23ff000UL;
+-		unsigned long va = gVirtBase + (fb_pa - gPhysBase);
+-		volatile unsigned int *p;
+-		unsigned long n;
+-
+-		pmap_map_bd((vm_map_address_t)va, (vm_offset_t)fb_pa,
+-		    (vm_offset_t)(fb_pa + fb_sz), VM_PROT_READ | VM_PROT_WRITE);
+-
+-		p = (volatile unsigned int *)(unsigned long)(va + 700UL * 0xCA8UL);
+-		for (n = 0; n < (272UL * 0xCA8UL / 4UL); n++) {
+-			p[n] = 0xFFFFFFFFU;
+-		}
+-
+-		FlushPoC_DcacheRegion((vm_offset_t)(va + 700UL * 0xCA8UL),
+-		    (size_t)(272UL * 0xCA8UL));
+-
+-		for (;;) {
+-			__asm__ __volatile__("wfe");
+-		}
+-	}
+ 
+ 	if (debug_boot_arg) {
+ 		patch_low_glo();
+diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -722,8 +722,14 @@
+ 	 * This will start displaying progress to the user, start as early as possible
+ 	 */
+ 	g0245d_fb_mark(2);
+-	g0245d_fb_block(600, 1400);	/* v153: prove we reach the kPEAcquireScreen call */
+-	g0245d_halt();			/* v153: freeze BEFORE the clear */
++	/*
++	 * G0245D v163: v153 left a g0245d_fb_block(600, 1400) + g0245d_halt() pair
++	 * right here - BEFORE initialize_screen(). It was never removed, so every
++	 * build from v153 to v162 died or froze at this exact line and the kernel
++	 * never once reached the kPEAcquireScreen clear, let alone anything after
++	 * it. That single leftover invalidated the readings of six versions.
++	 * Removed: let the kernel through.
++	 */
+ 	initialize_screen(NULL, kPEAcquireScreen);
+ 	g0245d_fb_mark(3);	/* v151: drawn AFTER the kPEAcquireScreen clear */
+ 
+diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -3377,20 +3377,41 @@
+ void
+ g0245d_fb_mark(int n)
+ {
+-	/* v151: paint through the kernel physmap; the vinfo.v_baseaddr VA never
+-	 * showed a single bar, while v133's physmap bands (gVirtBase+pa-gPhysBase)
+-	 * did light after arm_vm_init. fb phys 0x83401000, 24bpp, stride 0xCA8. */
++	/* v163: finally a mapping that can actually reach MDP5.
++	 *
++	 * History: the loader V=P window (0xC3401000) paints the panel, but it
++	 * dies in arm_vm_init (v161 photo: the pre-arm_vm_init flood shows, the
++	 * identical post-arm_vm_init flood does nothing). The kernel physmap
++	 * (gVirtBase+pa-gPhysBase) is Normal cacheable, so stores sit in cache and
++	 * MDP5's DMA never sees them; pmap_map_bd() will not override that existing
++	 * mapping anyway, so it was a no-op.
++	 *
++	 * ml_io_map_wcomb() allocates a FRESH range in kernel_map and maps it with
++	 * CACHE_ATTRINDX_WRITECOMB (non-cacheable, write-combining) - the correct
++	 * attribute for a DMA-fed framebuffer. Needs kernel_map, so this must only
++	 * be called from machine_startup onward.
++	 *
++	 * Bands are cumulative: mark(n) draws bands 1..n, so the number of white
++	 * bars on screen is the furthest mark the kernel reached. Row placement
++	 * stays inside 700..1000, the range the old bands proved writable.
++	 */
+ 	const uint64_t fb_pa    = 0x83401000ULL;
++	const uint64_t fb_size  = 0x23ff000ULL;
+ 	const uint64_t rowbytes = 0xCA8ULL;   /* 1080 px * 3 bytes (24bpp) */
+-	uint64_t       va;
++	static uint64_t fb_va   = 0;
+ 	unsigned int   i;
+ 
+-	va = gVirtBase + (fb_pa - gPhysBase);
++	if (fb_va == 0) {
++		fb_va = (uint64_t)ml_io_map_wcomb((vm_offset_t)fb_pa, (vm_size_t)fb_size);
++	}
++	if (fb_va == 0) {
++		return;
++	}
+ 
+ 	for (i = 0; i < (unsigned int)n; i++) {
+-		uint64_t       off = (uint64_t)(1000 + i * 80) * rowbytes;
++		uint64_t       off = (uint64_t)(700 + i * 60) * rowbytes;
+ 		uint64_t       k;
+-		unsigned char *p   = (unsigned char *)(uintptr_t)(va + off);
++		unsigned char *p   = (unsigned char *)(uintptr_t)(fb_va + off);
+ 
+ 		for (k = 0; k < 40ULL * rowbytes; k++) {
+ 			p[k] = 0xFF;

@@ -1,0 +1,24 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -826,6 +826,20 @@
+ 	 * against string vulnerabilities
+ 	 */
+ 	__stack_chk_guard &= ~(0xFFULL << 8);
++	/*
++	 * G0245D v174: binary-split diagnostic. v172 proved g0245d_fb_va paints
++	 * here in arm_init (right after arm_vm_init); v173 proved the six
++	 * g0245d_fb_mark() bars in startup.c never appear. Draw those same six
++	 * bars HERE, at the last point in arm_init before machine_startup handoff:
++	 *   six bars  -> fb slot is valid through all of arm_init, so the fault is
++	 *               after machine_startup (slot rebuilt by pmap, or panel off)
++	 *   no bars   -> g0245d_fb_va dies inside arm_init itself; the TTBR1 slot
++	 *               is being torn down by a later step in arm_init.
++	 */
++	{
++		extern void g0245d_fb_mark(int n);
++		g0245d_fb_mark(6);
++	}
+ 	machine_startup(args);
+ }
+ 

@@ -1,0 +1,130 @@
+diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -772,6 +772,19 @@
+ 	vm_commpage_text_init();
+ 	g0245d_fb_mark(6);
+ 
++	/*
++	 * G0245D v168: v166+v167 proved no call in this function is responsible
++	 * for the black panel, so the MMSS display block itself is losing power or
++	 * clocks. Replay the mu-Silicium MmssPowerAndClocks() sequence from here.
++	 * If MDP5 kept its scanout registers, the picture comes back by itself and
++	 * the white blocks painted in arm_init reappear.
++	 */
++	{
++		extern void g0245d_mmss_recover(void);
++
++		g0245d_mmss_recover();
++	}
++
+ #if CONFIG_MACF
+ 	kernel_bootstrap_log("mac_policy_initmach");
+ 	mac_policy_initmach();
+diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -3472,3 +3472,103 @@
+ {
+ 	__asm__ __volatile__("msr daifset, #0xf\n1:\tb 1b" ::: "memory");
+ }
++
++/*
++ * G0245D v168: bring the MMSS display power domains and clocks back up.
++ *
++ * v166 and v167 together cleared every display-touching call in
++ * machine_startup (kPEAcquireScreen, switch_to_video_console, kPETextScreen)
++ * and the panel still went black, so nothing in startup.c is switching the
++ * display off - the MMSS block itself is losing its power or clocks.
++ *
++ * The sequence below is copied from the msm8996 display library that ships
++ * with Mu-Silicium, the very bootloader that lights this panel:
++ *   Silicon/Qualcomm/Msm8996Pkg/Library/Msm8996DisplayLib/Msm8996DisplayLib.c
++ *   -> MmssPowerAndClocks()
++ * It needs no RPM messages, only plain MMIO to MMSS_CC, which is why we can
++ * replay it from XNU. Order matters: GDSC first (AXI island then core), then
++ * the AHB branch that reaches the MDP register space, then the pipeline clocks.
++ * MDP/AXI are sourced from GPLL0/2 = 300 MHz (map value 5, div 1), exactly as
++ * the library does.
++ *
++ * If MDP5 only lost its clocks, its scanout registers are still programmed and
++ * the panel resumes on its own. If the GDSCs had collapsed, their state is gone
++ * and this is only the first step towards a full mode set.
++ */
++static void
++g0245d_mmss_poll(volatile unsigned int *addr, unsigned int mask,
++    unsigned int expect, int max_us)
++{
++	int elapsed = 0;
++
++	while (elapsed < max_us) {
++		if ((*addr & mask) == expect) {
++			return;
++		}
++		for (volatile int spin = 0; spin < 200; spin++) {
++			;
++		}
++		elapsed += 10;
++	}
++}
++
++static void
++g0245d_mmss_gdsc(volatile unsigned int *cc, unsigned int off)
++{
++	volatile unsigned int *a = (volatile unsigned int *)((char *)cc + off);
++
++	if ((*a & (1u << 15)) != 0) {
++		return;                 /* already powered (hot hand-off) */
++	}
++	*a = *a & ~1u;                  /* clear SW_COLLAPSE */
++	g0245d_mmss_poll(a, (1u << 15), (1u << 15), 200000);
++}
++
++static void
++g0245d_mmss_branch(volatile unsigned int *cc, unsigned int off)
++{
++	volatile unsigned int *a = (volatile unsigned int *)((char *)cc + off);
++
++	*a = *a | 1u;
++	g0245d_mmss_poll(a, (1u << 31), 0, 200000);
++}
++
++static void
++g0245d_mmss_rcg2(volatile unsigned int *cc, unsigned int off, unsigned int cfg)
++{
++	volatile unsigned int *a = (volatile unsigned int *)((char *)cc + off);
++
++	a[0] = 0x01;                    /* CMD.UPDATE */
++	a[1] = cfg;                     /* CFG_RCGR */
++	a[0] = 0x01 | 0x02;             /* UPDATE | ROOT_EN */
++}
++
++void
++g0245d_mmss_recover(void)
++{
++	extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++	vm_offset_t            va;
++	volatile unsigned int *cc;
++
++	va = ml_io_map((vm_offset_t)0x008C0000UL, (vm_size_t)0x10000UL);
++	if (va == 0) {
++		return;
++	}
++	cc = (volatile unsigned int *)va;
++
++	g0245d_mmss_gdsc(cc, 0x00247C);   /* MMSS_MMAGIC_MDSS_GDSCR */
++	g0245d_mmss_gdsc(cc, 0x002304);   /* MMSS_MDSS_GDSCR */
++
++	g0245d_mmss_branch(cc, 0x002474); /* MMAGIC_MDSS_AXI_CBCR */
++	g0245d_mmss_branch(cc, 0x002478); /* MMAGIC_MDSS_NOC_CFG_AHB_CBCR */
++	g0245d_mmss_branch(cc, 0x002308); /* MDSS_AHB_CBCR */
++
++	g0245d_mmss_rcg2(cc, 0x005040, (5u << 8) | 1u);   /* AXI  <- GPLL0/2 */
++	g0245d_mmss_rcg2(cc, 0x002040, (5u << 8) | 1u);   /* MDP  <- GPLL0/2 */
++	g0245d_mmss_rcg2(cc, 0x002160, 0u);               /* ESC0 <- XO */
++
++	g0245d_mmss_branch(cc, 0x002310); /* MDSS_AXI_CBCR */
++	g0245d_mmss_branch(cc, 0x00231C); /* MDSS_MDP_CBCR */
++	g0245d_mmss_branch(cc, 0x002328); /* MDSS_VSYNC_CBCR */
++	g0245d_mmss_branch(cc, 0x002344); /* MDSS_ESC0_CBCR */
++}

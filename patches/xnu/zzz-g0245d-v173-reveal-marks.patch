@@ -1,0 +1,34 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -682,24 +682,12 @@
+ 	arm_vm_init(xmaxmem, args);
+ 
+ 	/*
+-	 * G0245D v172: paint rows 700..972 through the permanent TTBR1 framebuffer
+-	 * slot that arm_vm_init() just installed (g0245d_fb_va). No TTBR0
+-	 * borrowing, no TLB churn - just a device-attribute mapping that always
+-	 * reaches the panel.
+-	 */
+-	{
+-		extern vm_offset_t g0245d_fb_va;
+-		volatile unsigned int *p;
+-		unsigned long n;
+-
+-		if (g0245d_fb_va != 0) {
+-			p = (volatile unsigned int *)(unsigned long)
+-			    (g0245d_fb_va + 700UL * 0xCA8UL);
+-			for (n = 0; n < (272UL * 0xCA8UL / 4UL); n++) {
+-				p[n] = 0xFFFFFFFFU;
+-			}
+-		}
+-	}
++	 * G0245D v173: v172's permanent TTBR1 framebuffer slot is proven working -
++	 * its row 700..972 solid block lit up on the panel. Drop that block now so
++	 * the six g0245d_fb_mark() bars in startup.c (rows 700+45*i, 30 rows tall)
++	 * are no longer buried: the number of white bars reports how far the kernel
++	 * got through machine_startup.
++	 */
+ 
+ 	if (debug_boot_arg) {
+ 		patch_low_glo();

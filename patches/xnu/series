@@ -406,3 +406,164 @@ zzz-g0245d-v149-fb-marks.patch
 #   4 = survived kPEAcquireScreen + text-console restore
 #   5 = survived vm_commpage_init / vm_commpage_text_init
 zzz-g0245d-v150-marks-visible.patch
+
+# G0245D v151 (hardware 2026-11-16): v150 still black - no white bars at all,
+# while v146 (full-white fill BEFORE arm_vm_init) had shown a pure white screen.
+# Root cause of the missing marks: v149/v150 painted through vinfo.v_baseaddr
+# (the ml_io_map_unmappable VA). That path never showed, but v133's physmap
+# bands (gVirtBase + pa - gPhysBase) DID light after arm_vm_init (bands 13..20),
+# so the console VA is the wrong address to paint with. v151 rewrites
+# g0245d_fb_mark() to paint through the kernel physmap at the physical fb
+# 0x83401000 (24bpp, stride 0xCA8) and re-places the marks so each one is drawn
+# AFTER the call whose success it reports:
+#   1 = PE_init_iokit log (pre-clear; wiped by kPEAcquireScreen)
+#   2 = just before kPEAcquireScreen (pre-clear; wiped)
+#   3 = AFTER initialize_screen(kPEAcquireScreen) - survives the clear
+#   4 = after switch_to_video_console()
+#   5 = after initialize_screen(kPETextScreen)
+#   6 = after vm_commpage_init / vm_commpage_text_init
+# 0 bars => died inside kPEAcquireScreen; 3..6 => progressed that far.
+zzz-g0245d-v151-physmap-marks.patch
+
+# G0245D v152 (hardware 2026-11-16): v151 still black - but the foto is always
+# the loader's "HANDOFF IN 1s" frame, so we have NEVER actually seen the kernel's
+# post-handoff state; it flashes then goes black. Decisive test: right AFTER
+# initialize_screen(kPEAcquireScreen) (the call that wipes the fb + disables the
+# console) paint a BIG solid white block (rows 600..1400) through the physmap and
+# then HARD HALT (mask irq + spin). Nothing later can clear it.
+#   white block visible => the kernel SURVIVED the clear (alive, physmap valid) =>
+#                          the black is a LATER clear/console-off, kernel is running.
+#   still all black    => the kernel dies AT/INSIDE kPEAcquireScreen.
+zzz-g0245d-v152-block-halt.patch
+
+# G0245D v153 (hardware 2026-11-16): v152 (block+halt AFTER kPEAcquireScreen)
+# came back ALL BLACK -> the kernel never reaches the post-acquire code. Move
+# the block+halt to JUST BEFORE initialize_screen(kPEAcquireScreen) (halt before
+# the clear, so nothing wipes the block):
+#   white block => the kernel reaches the acquire call => it dies INSIDE
+#                  initialize_screen(kPEAcquireScreen).
+#   all black   => it dies earlier still (before the acquire call).
+zzz-g0245d-v153-halt-before-acquire.patch
+
+# G0245D v154 (hardware 2026-11-16): v153 (block+halt BEFORE kPEAcquireScreen)
+# also ALL BLACK. Combined with v152, the kernel is dying even before the acquire
+# path - and we have NEVER seen white after arm_vm_init (v146's white was BEFORE
+# it). So CALIBRATE the post-MMU draw: right after arm_vm_init() fill the whole
+# panel white through the physmap and halt.
+#   white => physmap reaches the fb and the kernel got past arm_vm_init.
+#   black => the physmap does NOT reach the fb (cont_splash_mem is a no-map
+#            carveout) or we die at/before arm_vm_init -> the whole physmap-mark
+#            approach (v151..v153) was drawing into unmapped memory.
+zzz-g0245d-v154-postmmu-white.patch
+
+# G0245D v155 (hardware 2026-11-16): ROOT CAUSE of every invisible draw found -
+# cont_splash_mem@0x83401000 is declared `no-map` in dts/g0245d.dts, so it is NOT
+# in the kernel physmap: gVirtBase+pa-gPhysBase points at unmapped memory and
+# every physmap paint (v151 marks, v152/153/154 blocks) FAULTS -> panic -> black/
+# freeze. v154 freezing at the loader frame = that fault firing right after
+# arm_vm_init. So the kernel may have been alive all along. Fix the draw: paint
+# through ml_io_map_unmappable (what the console uses), and (v154 reverted) put
+# the white block + halt back at the kernel_bootstrap_thread point just before
+# kPEAcquireScreen (line ~721) where kernel_map already exists.
+#   white => ml_io_map works AND we reach just before kPEAcquireScreen (alive!).
+#   black => ml_io_map failed for the no-map range OR we die in machine_startup.
+zzz-g0245d-v155-mliomap-fb.patch
+
+# G0245D v156 (hardware 2026-11-16): v155 (ml_io_map) also black. ml_io_map is
+# for MMIO, not DRAM. The splash region is reserved and absent from the bootstrap
+# physmap. FIX: after arm_vm_init()/pmap_bootstrap has run, map the splash
+# physical pages into the physmap VA with pmap_map_bd() (bootstrap mapping), then
+# fill the panel white and halt - at a point we KNOW is reached (arm_vm_init
+# completes). v153's block+halt at kernel_bootstrap is left as dead code.
+#   white => splashing the splash region into physmap works => physmap paints
+#            and the console are finally visible.
+#   black => pmap_map_bd failed or mapped read-only (pmap_force_pte_kernel_ro...).
+zzz-g0245d-v156-map-splash-physmap.patch
+
+# G0245D v157 (hardware 2026-11-16): no serial, no reachable framebuffer - so use
+# PSCI SYSTEM_RESET (x0=0x84000009; smc #0, the exact sequence patch-xnu-entry-
+# probe.py uses) as a display-free reachability probe. Placed right AFTER
+# arm_vm_init(). REBOOT (loader reappears / boot loop) => the kernel completed
+# arm_vm_init and the reset conduit works. Static black/frozen => we never got
+# here (or the reset conduit is dead). This finally disambiguates "kernel dead
+# early" vs "kernel alive, only display is broken", which the screen never could.
+zzz-g0245d-v157-reset-probe-armvminit.patch
+
+# G0245D v158 (hardware 2026-11-16): v157 (reset AFTER arm_vm_init) froze with no
+# reboot. Ambiguous: either arm_vm_init never completes, OR the PSCI reset conduit
+# is dead here. Calibrate it at a point we KNOW is reached - the arm_vm_init CALL
+# SITE (band 21 lights right before it). If THIS reboots, resets work and v157's
+# freeze means arm_vm_init itself hangs; if this ALSO freezes, the PSCI SMC reset
+# is dead on this board and we must find another reachability signal (HVC / PMIC /
+# watchdog).
+zzz-g0245d-v158-reset-before-armvminit.patch
+# v159: multi-conduit hard reset probe at arm_init entry (band 7, always reached)
+zzz-g0245d-v159-reset-multiconduit.patch
+# v160: drop both reset/loop probes; three 16-row probes (identity before arm_vm_init,
+# identity after, physmap after) to find which mapping still reaches the panel
+zzz-g0245d-v160-three-way-map.patch
+# v161: flood rows 200-680 white before arm_vm_init, black after -> does the loader
+# V=P window survive the TTBR0 swap? (stays strictly inside band-proven rows)
+zzz-g0245d-v161-flood-erase.patch
+# v162: v161 proved the loader window dies in arm_vm_init. pmap_map_bd the splash
+# range onto the physmap VA, paint through THAT VA, then flush dcache (Normal cacheable)
+zzz-g0245d-v162-physmap-rebuild.patch
+# v163: (1) remove the leftover v153 fb_block+halt in machine_startup - it blocked every
+# build since v153; (2) drop the no-op pmap_map_bd; (3) fb_mark now uses ml_io_map_wcomb
+zzz-g0245d-v163-wcomb-marks.patch
+# v164: pmap_* forwards to sptm_map_page with __assert_only return -> silent no-op on this
+# board. Borrow the loader TTBR0 back for one paint (the only photo-proven mapping)
+zzz-g0245d-v164-ttbr0-borrow.patch
+# v165: v164 proved the loader table can paint. fb_mark() now borrows TTBR0 for every
+# paint (one swap per mark), so kernel progress becomes visible from machine_startup on
+zzz-g0245d-v165-borrowed-paint.patch
+# v166: skip initialize_screen(kPEAcquireScreen) - vc_progress_set wipes the whole fb and
+# gc_enable(FALSE) kills console output; that is what erases our blocks and blacks the panel
+zzz-g0245d-v166-skip-acquire-clear.patch
+# v167: v166 skipped the acquire clear and it still went black -> also skip
+# switch_to_video_console + initialize_screen(kPETextScreen). Still black => the DISPLAY is
+# switched off later (MDP5/DSI clocks/power), not the framebuffer being wiped
+zzz-g0245d-v167-skip-text-console.patch
+# v168: startup.c is innocent (v166/v167). Replay Mu-Silicium MmssPowerAndClocks() to
+# bring MMSS GDSCs + MDP/AXI/VSYNC clocks back up -> if MDP5 kept its registers the panel resumes
+zzz-g0245d-v168-mmss-recover.patch
+# v169: paint rows 700..972 after arm_vm_init (v164 recipe, no halt) and halt right after
+# the MMSS replay -> a photo now says whether the replay revived MDP5 or the GDSCs collapsed
+zzz-g0245d-v169-paint-then-halt.patch
+# v170: can ml_io_map (VM_WIMG_IO, non-cacheable) map DRAM and reach the panel? If a white
+# band appears at rows 1000..1160 we finally have a kernel-side painter that needs no TTBR0 borrow
+zzz-g0245d-v170-mliomap-paint.patch
+# v171: re-run the Mu-Silicium GDSC/clock sequence in a ~10s loop before halting, to tell
+# 'power rails die' apart from 'DSI link/panel sleeps' (the last open question)
+zzz-g0245d-v171-mmss-keeper.patch
+# v172: install a permanent device-attribute framebuffer mapping into the TTBR1 tables during
+# arm_vm_init (technique from the G0345D port). Replaces TTBR0 borrowing; all painters use g0245d_fb_va
+zzz-g0245d-v172-ttbr1-fb-slot.patch
+
+# v173: v172's row 700..972 solid block buried the six startup.c fb_mark bars;
+# drop it so the bar count reveals how far machine_startup got.
+zzz-g0245d-v173-reveal-marks.patch
+
+# v174: binary split - draw mark(6) at the END of arm_init (fb slot proven good
+# there in v172) to tell 'slot dies in arm_init' from 'fault after machine_startup'.
+zzz-g0245d-v174-arm-end-mark.patch
+
+# v175: 5 staged marks across arm_init after arm_vm_init (1..5) plus the
+# existing mark(6) at the tail; the highest bar count on screen pins which
+# call (PE_create_console / PE_init_printf / PE_init_platform) kills the slot.
+zzz-g0245d-v175-stage-marks.patch
+
+# v176: ROOT CAUSE - v172's TTBR1 fb slot never installed (fb_va stuck at 0
+# because arm_vm_init maps over the slot VA). Restore the only photo-proven
+# painter: borrow loader TTBR0, paint bands via 0xC3401000, restore.
+zzz-g0245d-v176-borrow-painter.patch
+
+# v177: GEOMETRY BASELINE - draw the 6 mark bars BEFORE arm_vm_init via
+# the proven loader VA 0xC3401000 (no borrow). Six bars => brush+geometry
+# correct, fault is after arm_vm_init; none => our row calibration is wrong.
+zzz-g0245d-v177-geometry-baseline.patch
+
+# v178: A/B vs v177 - after arm_vm_init, paint the same 6 bars BLACK via
+# the same loader VA with plain stores. Black => VA+kernel survive; white
+# => VA dies across arm_vm_init / kernel aborts here; need permanent map.
+zzz-g0245d-v178-ab-after-vm.patch

@@ -1,0 +1,21 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -613,6 +613,17 @@
+ 
+ 	arm_vm_init(xmaxmem, args);
+ 
++	/* G0245D v154: calibrate post-MMU physmap drawing. Fill the whole panel
++	 * white through the kernel physmap and halt. White => the physmap reaches
++	 * the framebuffer and we are past arm_vm_init; black => we are not. */
++	{
++		extern void g0245d_fb_block(int r0, int r1);
++		extern void g0245d_halt(void);
++
++		g0245d_fb_block(0, 1920);
++		g0245d_halt();
++	}
++
+ 	if (debug_boot_arg) {
+ 		patch_low_glo();
+ 	}

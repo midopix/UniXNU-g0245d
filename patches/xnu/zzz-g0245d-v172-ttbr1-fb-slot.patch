@@ -1,0 +1,258 @@
+diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -2150,6 +2150,97 @@
+ 	arm_set_user_tbi();
+ 
+ 	arm_vm_physmap_init(args);
++
++	/*
++	 * G0245D v172: install a dedicated framebuffer mapping into the TTBR1
++	 * tables while the bootstrap TTBR0 is still live.
++	 *
++	 * Technique borrowed from the G0345D port (Yuanchu000I/UniXUN-g0345d:
++	 * zzz-g0345d-v169-172-fb-slot.patch, v178-bootstrap-l2-va,
++	 * v179-full-framebuffer-slot). Borrowing TTBR0 at paint time works but
++	 * costs two full TLB invalidations per paint and only survived because
++	 * the loader tables happened to still be intact; this installs a
++	 * permanent mapping instead.
++	 *
++	 * Three traps that port documented and we inherit:
++	 *  1. alloc_ptpage() does NOT zero the page - bzero() it explicitly or
++	 *     the neighbouring descriptors hold garbage.
++	 *  2. Still on the bootstrap TTBR0 here, phystokv() returns the new (not
++	 *     yet live) TTBR1 aperture, so reach an existing L2 page with the
++	 *     gVirtBase/gPhysBase identity math instead.
++	 *  3. The descriptor physical base is 2 MB aligned while the framebuffer
++	 *     starts part-way into it, so the usable VA must add
++	 *     (fb_pa - block_base) or every write lands megabytes away.
++	 *
++	 * Attribute is CACHE_ATTRINDX_DISABLE (device, non-cacheable) to match
++	 * the bootstrap 1 GB block in start.s (TTE 0x8000060D, ATTR disable) -
++	 * the only mapping that has ever put a pixel on this panel. A cacheable
++	 * mapping is exactly why the physmap never reached MDP5.
++	 */
++	{
++		extern vm_offset_t g0245d_fb_va;
++		const uint64_t fb_pa      = 0x83401000ULL;
++		const uint64_t fb_bytes   = 3240ULL * 1920ULL;
++		const uint64_t block_base = fb_pa & ARM_TTE_BLOCK_L2_MASK;
++		const uint64_t fb_offset  = fb_pa - block_base;
++		const unsigned int fb_blocks = (unsigned int)
++		    ((fb_offset + fb_bytes + ARM_TT_L2_SIZE - 1) / ARM_TT_L2_SIZE);
++		vm_offset_t fb_slot = (vm_offset_t)
++		    ((VM_MAX_KERNEL_ADDRESS - 0x10000000ULL) & ~(uint64_t)ARM_TT_L2_OFFMASK);
++		tt_entry_t *l1_tte_fb;
++		tt_entry_t *l2_tte_fb;
++		vm_offset_t l2_page;
++		unsigned int l2_index;
++		unsigned int i;
++
++		l1_tte_fb = cpu_tte + ((fb_slot & ARM_TT_L1_INDEX_MASK) >> ARM_TT_L1_SHIFT);
++		l2_index = (unsigned int)((fb_slot & ARM_TT_L2_INDEX_MASK) >> ARM_TT_L2_SHIFT);
++
++		if ((l2_index + fb_blocks) > (ARM_PGBYTES / sizeof(tt_entry_t))) {
++			fb_slot -= (vm_offset_t)ARM_TT_L2_SIZE * fb_blocks;
++			l1_tte_fb = cpu_tte + ((fb_slot & ARM_TT_L1_INDEX_MASK) >> ARM_TT_L1_SHIFT);
++			l2_index = (unsigned int)((fb_slot & ARM_TT_L2_INDEX_MASK) >> ARM_TT_L2_SHIFT);
++		}
++
++		if (*l1_tte_fb == ARM_TTE_EMPTY) {
++			l2_page = alloc_ptpage(TRUE);
++			bzero((void *)l2_page, ARM_PGBYTES);
++			*l1_tte_fb = (kvtophys(l2_page) & ARM_TTE_TABLE_MASK) |
++			    ARM_TTE_TYPE_TABLE | ARM_TTE_VALID |
++			    ARM_TTE_TABLE_AP(ARM_TTE_TABLE_AP_USER_NA);
++		} else {
++			pmap_paddr_t l2_pa = (pmap_paddr_t)((*l1_tte_fb) & ARM_TTE_TABLE_MASK);
++
++			l2_page = (vm_offset_t)(l2_pa - (pmap_paddr_t)gPhysBase +
++			    (vm_offset_t)gVirtBase);
++		}
++
++		l2_tte_fb = (tt_entry_t *)l2_page + l2_index;
++
++		if ((*l1_tte_fb & (ARM_TTE_VALID | ARM_TTE_TYPE_MASK)) ==
++		    (ARM_TTE_VALID | ARM_TTE_TYPE_TABLE)) {
++			for (i = 0; i < fb_blocks; i++) {
++				if (l2_tte_fb[i] != ARM_TTE_EMPTY) {
++					break;
++				}
++			}
++			if (i == fb_blocks) {
++				for (i = 0; i < fb_blocks; i++) {
++					uint64_t block_pa = block_base +
++					    (uint64_t)i * (uint64_t)ARM_TT_L2_SIZE;
++
++					l2_tte_fb[i] = (block_pa & ARM_TTE_BLOCK_L2_MASK) |
++					    ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID |
++					    ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_NX |
++					    ARM_TTE_BLOCK_AP(0) |
++					    ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) |
++					    ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_DISABLE);
++				}
++				g0245d_fb_va = (vm_offset_t)(fb_slot + (vm_offset_t)fb_offset);
++			}
++		}
++	}
++
+ 	set_mmu_ttb_alternate(cpu_ttep & TTBR_BADDR_MASK);
+ 
+ #if XNU_MONITOR
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -370,6 +370,13 @@
+  *		Function:		Runs on the boot CPU, once, on entry from iBoot.
+  */
+ 
++/*
++ * G0245D v172: kernel VA of the framebuffer, installed by arm_vm_init() into
++ * the TTBR1 tables (device/non-cacheable, 2 MB blocks). 0 means "not mapped",
++ * in which case every painter must do nothing.
++ */
++vm_offset_t g0245d_fb_va = 0;
++
+ __startup_func
+ void
+ arm_init(
+@@ -382,6 +389,7 @@
+ 	DTEntry chosen = NULL;
+ 	unsigned int dt_entry_size = 0;
+ 
++
+ 	/*
+ 	 * g0245d v122: stage 7 - reached the C entry point (arm_init). Paint a
+ 	 * band through the post-MMU framebuffer mapping to prove the kernel got
+@@ -674,40 +682,23 @@
+ 	arm_vm_init(xmaxmem, args);
+ 
+ 	/*
+-	 * G0245D v169: paint rows 700..972 white through the borrowed loader table
+-	 * (exactly what v164 proved works) but WITHOUT halting this time. The point
+-	 * is to leave something on the panel that we can watch while the kernel
+-	 * runs on, so that a later halt shows whether the MMSS replay revived MDP5.
++	 * G0245D v172: paint rows 700..972 through the permanent TTBR1 framebuffer
++	 * slot that arm_vm_init() just installed (g0245d_fb_va). No TTBR0
++	 * borrowing, no TLB churn - just a device-attribute mapping that always
++	 * reaches the panel.
+ 	 */
+ 	{
+-		extern uint64_t g0245d_ttbr0_loader;
+-		uint64_t ttbr0_now = 0;
+-
+-		__asm__ __volatile__("mrs %0, ttbr0_el1" : "=r"(ttbr0_now));
+-
+-		__asm__ __volatile__("msr ttbr0_el1, %0" :: "r"(g0245d_ttbr0_loader) : "memory");
+-		__asm__ __volatile__("dsb sy" ::: "memory");
+-		__asm__ __volatile__("isb" ::: "memory");
+-		__asm__ __volatile__("tlbi vmalle1" ::: "memory");
+-		__asm__ __volatile__("dsb sy" ::: "memory");
+-		__asm__ __volatile__("isb" ::: "memory");
+-
+-		{
+-			volatile unsigned int *p = (volatile unsigned int *)(unsigned long)
+-			    (0xC3401000UL + 700UL * 0xCA8UL);
+-			unsigned long n;
++		extern vm_offset_t g0245d_fb_va;
++		volatile unsigned int *p;
++		unsigned long n;
+ 
++		if (g0245d_fb_va != 0) {
++			p = (volatile unsigned int *)(unsigned long)
++			    (g0245d_fb_va + 700UL * 0xCA8UL);
+ 			for (n = 0; n < (272UL * 0xCA8UL / 4UL); n++) {
+ 				p[n] = 0xFFFFFFFFU;
+ 			}
+ 		}
+-
+-		__asm__ __volatile__("msr ttbr0_el1, %0" :: "r"(ttbr0_now) : "memory");
+-		__asm__ __volatile__("dsb sy" ::: "memory");
+-		__asm__ __volatile__("isb" ::: "memory");
+-		__asm__ __volatile__("tlbi vmalle1" ::: "memory");
+-		__asm__ __volatile__("dsb sy" ::: "memory");
+-		__asm__ __volatile__("isb" ::: "memory");
+ 	}
+ 
+ 	if (debug_boot_arg) {
+diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -3385,59 +3385,40 @@
+ void
+ g0245d_fb_mark(int n)
+ {
+-	/* v165: paint through the loader's own page table.
++	/* v172: paint through the permanent TTBR1 framebuffer slot that
++	 * arm_vm_init() installs (g0245d_fb_va, device/non-cacheable 2 MB blocks).
+ 	 *
+-	 * Every kernel-side mapping failed and we now know why: the physmap is
+-	 * Normal cacheable, so stores never reach DRAM where MDP5's DMA looks;
+-	 * ml_io_map_wcomb() produced no pixels; and the pmap_map_bd family
+-	 * forwards to sptm_map_page() whose result is checked only by
+-	 * __assert_only - silent failure on a board with no SPTM.
++	 * History, for the record: the loader V=P window at 0xC3401000 could
++	 * paint, but only while the loader's page table was still named by TTBR0
++	 * - borrowing it back worked (v164/v169 photos) yet cost two full TLB
++	 * invalidations per paint and stopped working once XNU recycled those
++	 * pages. The kernel physmap never worked because it is Normal cacheable:
++	 * stores sat in cache and MDP5's DMA, which reads DRAM, never saw them.
++	 * ml_io_map, pmap_map_bd and its _with_options variant all failed too -
++	 * the latter forwards to sptm_map_page(), whose result is only checked by
++	 * __assert_only, i.e. silent failure on a board without SPTM.
+ 	 *
+-	 * The one mapping with photo proof behind it is the loader's identity
+-	 * window at 0xC3401000 (v161 and v164 both painted solid blocks through
+-	 * it). arm_init() saves TTBR0 before arm_vm_init() swaps it, so we can
+-	 * point TTBR0 back at the loader's table for the duration of a paint and
+-	 * then restore. The kernel runs on TTBR1, so this never disturbs
+-	 * execution; the TLB has to be invalidated because entries for the
+-	 * swapped-out table are stale.
+-	 *
+-	 * Bands are cumulative and each call does ONE swap: mark(n) draws bands
+-	 * 1..n, so the number of white bars is the furthest mark reached. Bands
+-	 * live at rows 700 + 45*i, 30 rows tall, which keeps the last one (925)
+-	 * inside the 700..972 range the old bands proved writable.
++	 * Bands are cumulative: mark(n) draws bands 1..n, so the number of white
++	 * bars is the furthest mark reached. Rows 700 + 45*i with 30-row bars stay
++	 * inside 700..972, the range the old bootstrap bands proved writable.
+ 	 */
+-	uint64_t ttbr0_now;
++	extern vm_offset_t g0245d_fb_va;
++	const uint64_t rowbytes = 0xCA8ULL;   /* 1080 px * 3 bytes (24bpp) */
+ 	int      i;
+ 
+-	if ((g0245d_ttbr0_loader == 0) || (n <= 0)) {
++	if ((g0245d_fb_va == 0) || (n <= 0)) {
+ 		return;
+ 	}
+ 
+-	__asm__ __volatile__("mrs %0, ttbr0_el1" : "=r"(ttbr0_now));
+-
+-	__asm__ __volatile__("msr ttbr0_el1, %0" :: "r"(g0245d_ttbr0_loader) : "memory");
+-	__asm__ __volatile__("dsb sy" ::: "memory");
+-	__asm__ __volatile__("isb" ::: "memory");
+-	__asm__ __volatile__("tlbi vmalle1" ::: "memory");
+-	__asm__ __volatile__("dsb sy" ::: "memory");
+-	__asm__ __volatile__("isb" ::: "memory");
+-
+ 	for (i = 0; i < n; i++) {
+ 		volatile unsigned int *p = (volatile unsigned int *)(unsigned long)
+-		    (0xC3401000UL + (unsigned long)(700 + i * 45) * 0xCA8UL);
++		    ((uint64_t)g0245d_fb_va + (uint64_t)(700 + i * 45) * rowbytes);
+ 		unsigned long k;
+ 
+ 		for (k = 0; k < (30UL * 0xCA8UL / 4UL); k++) {
+ 			p[k] = 0xFFFFFFFFU;
+ 		}
+ 	}
+-
+-	__asm__ __volatile__("msr ttbr0_el1, %0" :: "r"(ttbr0_now) : "memory");
+-	__asm__ __volatile__("dsb sy" ::: "memory");
+-	__asm__ __volatile__("isb" ::: "memory");
+-	__asm__ __volatile__("tlbi vmalle1" ::: "memory");
+-	__asm__ __volatile__("dsb sy" ::: "memory");
+-	__asm__ __volatile__("isb" ::: "memory");
+ }
+ 
+ /*
