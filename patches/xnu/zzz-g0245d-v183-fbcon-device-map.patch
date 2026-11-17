@@ -1,0 +1,243 @@
+Subject: [PATCH] g0245d v183: fb console, device map, flipped, 24bpp
+
+diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
+--- a/pexpert/arm/pe_serial.c
++++ b/pexpert/arm/pe_serial.c
+@@ -747,6 +747,212 @@
+ 	gPESF = fns;
+ }
+ 
++/*****************************************************************************/
++/*
++ * G0245D v183: framebuffer text console, Device-mapped, row-flipped, 24bpp.
++ *
++ * Everything below comes from failures observed on the panel, not from theory:
++ *
++ *  - Mapping. v152 filled the fb through the kernel physmap
++ *    (gVirtBase + (pa - gPhysBase)). That range is Normal cacheable, so the
++ *    stores sat in cache and the display controller, which reads DRAM by DMA,
++ *    never saw them. ml_io_map() returns a Device-nGnRnE mapping, which is
++ *    what a scanout buffer needs.
++ *
++ *  - Timing. v180/v181 called ml_io_map() from serial_init, which runs before
++ *    arm_vm_init() has built the pmap, so it returned NULL and the probe
++ *    silently did nothing. Here the caller is arm_init() after
++ *    PE_create_console(), i.e. after arm_vm_init() at arm_init.c:522.
++ *
++ *  - Row order. SimpleFbDxe runs with mFbFlip = TRUE because the panel scans
++ *    the buffer bottom-up. Raw writes therefore appear upside down, so every
++ *    row index is flipped: y_fb = G0245D_FB_HEIGHT - 1 - y_screen.
++ *
++ *  - Depth. The DARWINBOOT trace on the device reports depth=24, and the
++ *    loader's PaintBand documents the panel byte order as (G, R, B). So a
++ *    pixel is 3 bytes written as G, R, B.
++ *
++ *  - Proof of life. The probe blanks its rows and then renders
++ *    "V183 FBCON OK" itself. It does not consult vinfo.v_baseaddr, which is
++ *    still 0 because vc_initialize() failed to map the framebuffer, and it
++ *    does not depend on PE_init_printf() having run.
++ */
++extern unsigned char iso_font[256 * 16];
++
++#define G0245D_FB_PA        0x83401000UL
++#define G0245D_FB_SIZE      0x200000UL
++#define G0245D_FB_STRIDE    0xCA8UL      /* 3240 == 1080 px * 3 bytes */
++#define G0245D_FB_BPP       3
++#define G0245D_FB_WIDTH     1080
++#define G0245D_FB_HEIGHT    1920
++
++#define G0245D_FBCON_SCALE  2
++#define G0245D_FBCON_COLS   50
++#define G0245D_FBCON_ROWS   18
++#define G0245D_FBCON_ROW0   40           /* screen row, before the flip */
++
++static volatile uint8_t *g0245d_fbcon_base;
++static uint32_t g0245d_fbcon_col = 0;
++static uint32_t g0245d_fbcon_row = 0;
++
++static void
++g0245d_fbcon_px(uint32_t x, uint32_t y_screen, uint8_t g, uint8_t r, uint8_t b)
++{
++	/* SimpleFbDxe is bottom-up: flip the row before touching memory. */
++	uint32_t y_fb = (uint32_t)G0245D_FB_HEIGHT - 1U - y_screen;
++	volatile uint8_t *p;
++
++	if ((x >= (uint32_t)G0245D_FB_WIDTH) || (y_fb >= (uint32_t)G0245D_FB_HEIGHT)) {
++		return;
++	}
++	p = g0245d_fbcon_base +
++	    (unsigned long)y_fb * G0245D_FB_STRIDE +
++	    (unsigned long)x * G0245D_FB_BPP;
++	p[0] = g;
++	p[1] = r;
++	p[2] = b;
++}
++
++static void
++g0245d_fbcon_blank_row(uint32_t row)
++{
++	uint32_t y;
++	uint32_t y0 = (G0245D_FBCON_ROW0 + row) * 16U * G0245D_FBCON_SCALE;
++
++	for (y = y0; y < y0 + 16U * G0245D_FBCON_SCALE; y++) {
++		uint32_t x;
++		for (x = 0; x < G0245D_FBCON_COLS * 8U * G0245D_FBCON_SCALE; x++) {
++			g0245d_fbcon_px(x, y, 0, 0, 0);
++		}
++	}
++}
++
++static void
++g0245d_fbcon_newline(void)
++{
++	g0245d_fbcon_col = 0;
++	g0245d_fbcon_row = (g0245d_fbcon_row + 1U) % G0245D_FBCON_ROWS;
++	g0245d_fbcon_blank_row(g0245d_fbcon_row);
++	g0245d_fbcon_blank_row((g0245d_fbcon_row + 1U) % G0245D_FBCON_ROWS);
++}
++
++static void
++g0245d_fbcon_init(void)
++{
++	uint32_t r;
++
++	g0245d_fbcon_col = 0;
++	g0245d_fbcon_row = 0;
++	for (r = 0; r < G0245D_FBCON_ROWS; r++) {
++		g0245d_fbcon_blank_row(r);
++	}
++}
++
++static unsigned int
++g0245d_fbcon_ready(void)
++{
++	return 1;
++}
++
++static void
++g0245d_fbcon_putc(uint8_t c)
++{
++	const unsigned char *glyph;
++	uint32_t x0, y0, gy, gx, sy, sx;
++
++	if (g0245d_fbcon_base == NULL) {
++		return;
++	}
++	if (c == '\r') {
++		g0245d_fbcon_col = 0;
++		return;
++	}
++	if (c == '\n') {
++		g0245d_fbcon_newline();
++		return;
++	}
++	if (c < 0x20U || c > 0x7eU) {
++		c = (uint8_t)'?';
++	}
++	if (g0245d_fbcon_col >= G0245D_FBCON_COLS) {
++		g0245d_fbcon_newline();
++	}
++
++	glyph = iso_font + (uint32_t)c * 16U;
++	x0 = g0245d_fbcon_col * 8U * G0245D_FBCON_SCALE;
++	y0 = (G0245D_FBCON_ROW0 + g0245d_fbcon_row) * 16U * G0245D_FBCON_SCALE;
++
++	for (gy = 0; gy < 16U; gy++) {
++		/* iso_font rows are MSB-leftmost: bit 7 is the leftmost pixel. */
++		uint8_t bits = glyph[gy];
++		for (gx = 0; gx < 8U; gx++) {
++			uint8_t on = (bits & (uint8_t)(0x80U >> gx)) ? 0xffU : 0x00U;
++			for (sy = 0; sy < G0245D_FBCON_SCALE; sy++) {
++				for (sx = 0; sx < G0245D_FBCON_SCALE; sx++) {
++					/* White: G=R=B so the (G,R,B) order is moot here. */
++					g0245d_fbcon_px(x0 + gx * G0245D_FBCON_SCALE + sx,
++					    y0 + gy * G0245D_FBCON_SCALE + sy,
++					    on, on, on);
++				}
++			}
++		}
++	}
++	g0245d_fbcon_col++;
++}
++
++static void
++g0245d_fbcon_puts(const char *s)
++{
++	while (*s != '\0') {
++		g0245d_fbcon_putc((uint8_t)*s++);
++	}
++}
++
++static unsigned int
++g0245d_fbcon_recv_ready(void)
++{
++	return 0;
++}
++
++static uint8_t
++g0245d_fbcon_recv_data(void)
++{
++	return 0;
++}
++
++SECURITY_READ_ONLY_LATE(static struct pe_serial_functions) g0245d_fbcon_serial_functions =
++{
++	.init = g0245d_fbcon_init,
++	.transmit_ready = g0245d_fbcon_ready,
++	.transmit_data = g0245d_fbcon_putc,
++	.receive_ready = g0245d_fbcon_recv_ready,
++	.receive_data = g0245d_fbcon_recv_data,
++	.device = SERIAL_G0245D_FBCON
++};
++
++/*
++ * Called from arm_init() right before PE_init_printf(). At this point
++ * arm_vm_init() has run, so the pmap exists and ml_io_map() can build a
++ * Device mapping for the scanout buffer.
++ */
++void
++g0245d_fbcon_start(void)
++{
++	g0245d_fbcon_base = (volatile uint8_t *)(uintptr_t)
++	    ml_io_map((vm_offset_t)G0245D_FB_PA, (vm_size_t)G0245D_FB_SIZE);
++	if (g0245d_fbcon_base == NULL) {
++		return;
++	}
++
++	g0245d_fbcon_init();
++	register_serial_functions(&g0245d_fbcon_serial_functions);
++
++	/* Proof of life, drawn without kprintf and without vinfo.v_baseaddr. */
++	g0245d_fbcon_puts("V183 FBCON OK");
++	g0245d_fbcon_puts("\n");
++	g0245d_fbcon_puts("ml_io_map device 24bpp flipped");
++}
++
+ #if HIBERNATION
+ /**
+  * Transitions the serial driver into a mode that can be run in the hibernation
+diff --git a/pexpert/pexpert/arm/protos.h b/pexpert/pexpert/arm/protos.h
+--- a/pexpert/pexpert/arm/protos.h
++++ b/pexpert/pexpert/arm/protos.h
+@@ -47,7 +47,8 @@
+ 	SERIAL_DOCKCHANNEL=0x2,
+ 	SERIAL_PI3_UART=0x4,
+ 	SERIAL_VMAPPLE_UART=0x8,
+-	SERIAL_DCC_UART=0x10
++	SERIAL_DCC_UART=0x10,
++	SERIAL_G0245D_FBCON=0x40
+ } serial_device_t;
+ 
+ kern_return_t serial_irq_enable(serial_device_t device);
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -855,6 +855,8 @@
+ 	/* setup console output */
+ 	/* G0245D v175 mark 2: after PE_create_console */
+ 	{ extern void g0245d_fb_mark(int n); g0245d_fb_mark(2); }
++	/* G0245D v183: framebuffer text console (pmap is up now). */
++	{ extern void g0245d_fbcon_start(void); g0245d_fbcon_start(); }
+ 	PE_init_printf(FALSE);
+ 
+ #if __arm64__

@@ -1,0 +1,87 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+index efded86..bd5df5b 100644
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -848,8 +848,16 @@ arm_init(
+ 	{ extern void g0245d_fb_mark(int n); g0245d_fb_mark(1); }
+ 	/* G0245D v184: physmap + cache clean probe (earliest after arm_vm_init). */
+ 	{ extern void g0245d_fb_probe(void); g0245d_fb_probe(); }
+-	/* G0245D v185: black the whole panel (unmistakable liveness signal). */
+-	{ extern void g0245d_fb_blackout(void); g0245d_fb_blackout(); }
++	/* G0245D v185: black the whole panel (unmistakable liveness signal).
++	 *
++	 * v187 DISABLED. It floods all 6,220,800 bytes of the scanout buffer with
++	 * black and cleans them to PoC, so it erases every diagnostic band painted
++	 * before this point: the BOOT_MARK strips in start.s (fb rows 200..551),
++	 * PAINT 8..12, g0245d_paint_stage(13..21), the v161 row-200..679 flood and
++	 * the six pre-arm_vm_init white bars. v185/v186 therefore read as a bare
++	 * black panel no matter how far the kernel got, which is exactly the
++	 * ambiguity v187 exists to remove. Keep the strips. */
++	/* { extern void g0245d_fb_blackout(void); g0245d_fb_blackout(); } */
+ 	PE_create_console();
+ 	/* G0245D v143: serial=3 + an enumerated UART switched the console to a
+ 	 * dead ttyHSL0 above, so the fb was cleared (black) and got no output.
+@@ -860,7 +868,19 @@ arm_init(
+ 	/* G0245D v175 mark 2: after PE_create_console */
+ 	{ extern void g0245d_fb_mark(int n); g0245d_fb_mark(2); }
+ 	/* G0245D v183: framebuffer text console (pmap is up now). */
+-	{ extern void g0245d_fbcon_start(void); g0245d_fbcon_start(); }
++	/* G0245D v183: framebuffer text console (pmap is up now).
++	 *
++	 * v187 DISABLED. g0245d_fbcon_start() (pexpert/arm/pe_serial.c:939) calls
++	 * ml_io_map() and only checks the result for NULL. io_map.c:105 falls into
++	 * the startup_phase < STARTUP_SUB_KMEM branch, which hands out
++	 * virtual_space_start + pmap_map_bd(), and io_submap does not exist until
++	 * STARTUP(KMEM, STARTUP_RANK_LAST, io_map_init) - arm_init() sits between
++	 * those two points, so this cannot produce a usable mapping here (see the
++	 * v184 note at video_console.c:3485). It then writes "V183 FBCON OK"
++	 * through whatever it got, an invisible death landing exactly between
++	 * fb_mark(2) and fb_mark(3) - i.e. it masks the one signal v187 needs.
++	 * Nothing in the bring-up depends on it. */
++	/* { extern void g0245d_fbcon_start(void); g0245d_fbcon_start(); } */
+ 	PE_init_printf(FALSE);
+ 
+ #if __arm64__
+diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
+index e47d573..e6e0d25 100644
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -779,6 +779,30 @@ kernel_bootstrap_thread(void)
+ 	 * If MDP5 kept its scanout registers, the picture comes back by itself and
+ 	 * the white blocks painted in arm_init reappear.
+ 	 */
++#if 0	/* G0245D v187: DISABLED - this block was the bring-up's own ceiling.
++	 *
++	 * As written it is unconditional: 2000 x (g0245d_mmss_recover() + a
++	 * volatile 2,000,000-iteration spin), then g0245d_halt(), which is
++	 * "msr daifset, #0xf; 1: b 1b" - a permanent spin with IRQs masked. So
++	 * from v168 onward every boot ended HERE, by design, a few seconds after
++	 * g0245d_fb_mark(6). Nothing past machine_startup ever ran.
++	 *
++	 * Worse, the looped-over call is not benign: g0245d_mmss_recover()
++	 * (osfmk/console/video_console.c:3648) reaches the MMSS register block
++	 * through ml_io_map() - the same call that cannot work in this window (see
++	 * video_console.c:3485) - and writes GDSC, branch-clock and RCG2 registers
++	 * for MDSS/MDP/AXI/VSYNC/ESC0. It replays Mu-Silicium's
++	 * MmssPowerAndClocks() 2000 times on a board where we do not own the
++	 * display driver. That is the most plausible cause of the panel going black
++	 * AFTER the white bars have already appeared.
++	 *
++	 * Together with arm_init.c g0245d_fb_blackout() (also disabled in v187)
++	 * this accounts for every "frozen / all black" photo since v183 without
++	 * invoking a single kernel bug: the kernel painted, then wiped the panel,
++	 * then deliberately stopped.
++	 *
++	 * v187 deletes the block so the kernel keeps going and we finally learn
++	 * what lies past machine_startup. */
+ 	{
+ 		extern void g0245d_mmss_recover(void);
+ 		extern void g0245d_halt(void);
+@@ -813,6 +837,7 @@ kernel_bootstrap_thread(void)
+ 
+ 		g0245d_halt();
+ 	}
++#endif	/* G0245D v187 */
+ 
+ #if CONFIG_MACF
+ 	kernel_bootstrap_log("mac_policy_initmach");

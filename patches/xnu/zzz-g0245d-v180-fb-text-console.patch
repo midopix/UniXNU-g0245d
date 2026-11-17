@@ -1,0 +1,152 @@
+diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
+--- a/pexpert/arm/pe_serial.c
++++ b/pexpert/arm/pe_serial.c
+@@ -747,6 +747,126 @@
+ 	gPESF = fns;
+ }
+ 
++/*****************************************************************************/
++/*
++ * G0245D v180: framebuffer text console. No serial hardware on this board
++ * (BLSP2 UART2 pads are not broken out), so route kprintf onto the boot
++ * framebuffer as 8x16 ISO glyphs. Based on nabu's
++ * 0003-nabu-framebuffer-serial-console.patch, using the proven ml_io_map()
++ * path (ml_io_map_wcomb/unmappable were the v155/v170 dead ends).
++ * Drawn in the LOWER panel (row 40..) to avoid the stock video console v143
++ * forced back on. Pure stores, no allocation, no MMIO, never blocks.
++ */
++extern unsigned char iso_font[256 * 16];
++
++#define G0245D_FBCON_SCALE   2
++#define G0245D_FBCON_FG      0xffffffffu
++#define G0245D_FBCON_BG      0xff000000u
++#define G0245D_FBCON_PA      0x83401000UL
++#define G0245D_FBCON_SIZE    0x200000UL
++#define G0245D_FBCON_STRIDE  0xCA8UL
++#define G0245D_FBCON_COLS    50
++#define G0245D_FBCON_ROWS    18
++#define G0245D_FBCON_ROW0    40
++
++static volatile uint32_t *g0245d_fbcon_base;
++static uint32_t g0245d_fbcon_col = 0;
++static uint32_t g0245d_fbcon_row = 0;
++
++static void
++g0245d_fbcon_clear_row(uint32_t row)
++{
++	uint32_t y0 = (G0245D_FBCON_ROW0 + row) * 16 * G0245D_FBCON_SCALE;
++	for (uint32_t y = y0; y < y0 + 16 * G0245D_FBCON_SCALE; y++) {
++		volatile uint32_t *line = g0245d_fbcon_base + y * (G0245D_FBCON_STRIDE / 4);
++		for (uint32_t x = 0; x < 810; x++) {
++			line[x] = G0245D_FBCON_BG;
++		}
++	}
++}
++
++static void
++g0245d_fbcon_newline(void)
++{
++	g0245d_fbcon_col = 0;
++	g0245d_fbcon_row = (g0245d_fbcon_row + 1) % G0245D_FBCON_ROWS;
++	g0245d_fbcon_clear_row(g0245d_fbcon_row);
++	g0245d_fbcon_clear_row((g0245d_fbcon_row + 1) % G0245D_FBCON_ROWS);
++}
++
++static void
++g0245d_fbcon_init(void)
++{
++	g0245d_fbcon_col = g0245d_fbcon_row = 0;
++	for (uint32_t r = 0; r < G0245D_FBCON_ROWS; r++) {
++		g0245d_fbcon_clear_row(r);
++	}
++}
++
++static unsigned int
++g0245d_fbcon_ready(void)
++{
++	return 1;
++}
++
++static void
++g0245d_fbcon_putc(uint8_t c)
++{
++	if (g0245d_fbcon_base == NULL) { return; }
++	if (c == '\r') { g0245d_fbcon_col = 0; return; }
++	if (c == '\n') { g0245d_fbcon_newline(); return; }
++	if (g0245d_fbcon_col >= G0245D_FBCON_COLS) { g0245d_fbcon_newline(); }
++	const unsigned char *glyph = iso_font + c * 16;
++	uint32_t x0 = g0245d_fbcon_col * 8 * G0245D_FBCON_SCALE;
++	uint32_t y0 = (G0245D_FBCON_ROW0 + g0245d_fbcon_row) * 16 * G0245D_FBCON_SCALE;
++	for (uint32_t gy = 0; gy < 16; gy++) {
++		for (uint32_t sy = 0; sy < G0245D_FBCON_SCALE; sy++) {
++			volatile uint32_t *line = g0245d_fbcon_base
++			    + (y0 + gy * G0245D_FBCON_SCALE + sy) * (G0245D_FBCON_STRIDE / 4) + x0;
++			for (uint32_t gx = 0; gx < 8; gx++) {
++				uint32_t px = (glyph[gy] & (1u << gx)) ? G0245D_FBCON_FG : G0245D_FBCON_BG;
++				for (uint32_t sx = 0; sx < G0245D_FBCON_SCALE; sx++) {
++					line[gx * G0245D_FBCON_SCALE + sx] = px;
++				}
++			}
++		}
++	}
++	g0245d_fbcon_col++;
++}
++
++static unsigned int
++g0245d_fbcon_recv_ready(void)
++{
++	return 0;
++}
++
++static uint8_t
++g0245d_fbcon_recv_data(void)
++{
++	return 0;
++}
++
++SECURITY_READ_ONLY_LATE(static struct pe_serial_functions) g0245d_fbcon_serial_functions =
++{
++	.init = g0245d_fbcon_init,
++	.transmit_ready = g0245d_fbcon_ready,
++	.transmit_data = g0245d_fbcon_putc,
++	.receive_ready = g0245d_fbcon_recv_ready,
++	.receive_data = g0245d_fbcon_recv_data,
++	.device = SERIAL_G0245D_FBCON
++};
++
++static void
++g0245d_fbcon_probe(void)
++{
++	g0245d_fbcon_base = (volatile uint32_t *)(uintptr_t)
++	    ml_io_map((vm_offset_t)G0245D_FBCON_PA, (vm_size_t)G0245D_FBCON_SIZE);
++	if (g0245d_fbcon_base != NULL) {
++		g0245d_fbcon_init();
++		register_serial_functions(&g0245d_fbcon_serial_functions);
++	}
++}
++
+ #if HIBERNATION
+ /**
+  * Transitions the serial driver into a mode that can be run in the hibernation
+@@ -798,6 +918,8 @@
+ 	uint32_t const  *prop_value __unused = NULL;
+ 
+ 	struct pe_serial_functions *fns = gPESF;
++
++	g0245d_fbcon_probe();
+ 
+ 	/**
+ 	 * Even if the serial devices have already been initialized on cold boot,
+diff --git a/pexpert/pexpert/arm/protos.h b/pexpert/pexpert/arm/protos.h
+--- a/pexpert/pexpert/arm/protos.h
++++ b/pexpert/pexpert/arm/protos.h
+@@ -47,7 +47,8 @@
+ 	SERIAL_DOCKCHANNEL=0x2,
+ 	SERIAL_PI3_UART=0x4,
+ 	SERIAL_VMAPPLE_UART=0x8,
+-	SERIAL_DCC_UART=0x10
++	SERIAL_DCC_UART=0x10,
++	SERIAL_G0245D_FBCON=0x40
+ } serial_device_t;
+ 
+ kern_return_t serial_irq_enable(serial_device_t device);

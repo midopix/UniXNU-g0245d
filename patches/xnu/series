@@ -567,3 +567,145 @@ zzz-g0245d-v177-geometry-baseline.patch
 # the same loader VA with plain stores. Black => VA+kernel survive; white
 # => VA dies across arm_vm_init / kernel aborts here; need permanent map.
 zzz-g0245d-v178-ab-after-vm.patch
+zzz-g0245d-v179-ml-io-map.patch
+
+# v180 (SUPERSEDED by v181, kept for history): framebuffer TEXT console -
+# register the boot fb as a pe_serial_functions and route kprintf into 8x16
+# glyphs in the LOWER panel, leaving the stock video console alone.
+#
+# v180 was flashed (md5 f3d74ac6b47d2e1d655ffdfedea1234b) and the panel then
+# showed the loader trace, whose video line is the decisive datum:
+#   DARWINBOOT: video base=0x83401000 display=1 row=3240 width=1080 height=1920 depth=24
+# depth=24 means 3 bytes per pixel (stride 3240 == 1080*3, no padding), but
+# v180 stored uint32_t. A 32bpp store into a 24bpp aperture writes the byte
+# pattern 00 00 00 ff repeatedly, which renders as black/blue/green/red
+# vertical stripes - never legible glyphs. v181 fixes exactly this and is a
+# full replacement for v180, so only v181 is listed below.
+
+# v181 (SUPERSEDED by v182): fixed the 24bpp store bug but still fetched the
+# framebuffer with ml_io_map(). v181 was never flashed - the v180 panel photo
+# already showed that no black block appeared at all, and g0245d_fbcon_init()
+# blanks with zero bytes, which look identical at 24 and 32 bpp. So the base
+# pointer was NULL: ml_io_map() does not work from serial_init.
+
+# v182 (SUPERSEDED by v183): wrote through the loader identity VA 0xC3401000.
+# That mapping is installed by the loader, but start.s rebuilds TTBR0/TTBR1 in
+# common_start() via create_bootstrap_mapping(), so the loader VA is gone long
+# before any kernel C code runs. Writing it faults. The "six white bars" that
+# v177 seemed to prove were in fact boot-menu UI chrome, not kernel output.
+
+# v183: framebuffer TEXT console with all four root causes fixed at once.
+#   1. mapping : ml_io_map() -> Device-nGnRnE. v152 painted through the physmap
+#      (Normal cacheable), so the stores never reached DRAM and the scanout
+#      engine, reading by DMA, kept showing stale pixels.
+#   2. timing  : called from arm_init() right before PE_init_printf(), which is
+#      after arm_vm_init() at arm_init.c:522, so the pmap exists and
+#      ml_io_map() does not return NULL (that was v180/v181).
+#   3. row order: SimpleFbDxe runs mFbFlip = TRUE (panel scans bottom-up), so
+#      every row index is flipped: y_fb = 1919 - y_screen.
+#   4. depth   : 24bpp, bytes (G, R, B), per the DARWINBOOT trace and the
+#      loader's PaintBand comment.
+# It also bypasses vinfo.v_baseaddr, which stays 0 because vc_initialize()'s
+# ml_io_map_unmappable() fails, and that 0 is why every v149 mark returned
+# silently.
+zzz-g0245d-v183-fbcon-device-map.patch
+
+# v184: the authoritative liveness probe, and the reason v180-v183 could never
+# have worked. osfmk/arm/io_map.c:105 has two early paths and arm_init() sits
+# between them: before STARTUP_SUB_KMEM it slices virtual_space_start and calls
+# pmap_map_bd(), and after it, kmem_alloc(io_submap, ...) -- but io_submap only
+# exists once STARTUP(KMEM, STARTUP_RANK_LAST, io_map_init) has run. So
+# ml_io_map() cannot succeed from arm_init(); it either returns 0 or trips over
+# a NULL submap. v183 therefore did nothing visible.
+#
+# v184 goes through the physmap instead, which arm_vm_init() has definitely
+# built: va = gVirtBase + (pa - gPhysBase). That mapping is Normal cacheable,
+# which is exactly why v152's block never showed -- the stores sat in cache
+# while the scanout engine read DRAM. v184 cleans every touched line to the
+# point of coherency with `dc civac` plus a `dsb sy`.
+#
+# It paints a solid black band over screen rows 1250..1450 (flipped, because
+# SimpleFbDxe is mFbFlip = TRUE) and runs immediately after arm_vm_init(),
+# before PE_create_console(). A black band on the light grey lower panel means
+# the kernel definitely survived arm_vm_init(), which nothing so far has
+# actually proven.
+zzz-g0245d-v184-physmap-flush-probe.patch
+
+# v185: black the entire framebuffer. v184's 200-row band through the physmap
+# produced nothing, leaving two possibilities that a band cannot separate:
+# either the kernel never reaches arm_init()'s post-arm_vm_init code, or the
+# physmap address arithmetic is wrong. A wholly black panel settles it -- there
+# is no loader UI or boot-menu chrome that looks black by accident.
+#
+# Also corrects a size error that has been in every probe so far: the full
+# panel is 1080 * 1920 * 3 = 6220800 bytes (0x5EE600), not 0x200000. 2MiB only
+# covers roughly 640 of the 1920 rows.
+zzz-g0245d-v185-fb-blackout.patch
+
+# v188: make the framebuffer console actually draw. Two defects in v183/v185 are
+# fixed, both read straight out of the tree:
+#
+# 1) ml_io_map() cannot fail and cannot be checked. osfmk/arm/io_map.c has a
+#    single return, "return start + start_offset" - the pre-KMEM branch takes
+#    virtual_space_start, the late branch calls kmem_alloc(KMA_NOFAIL). So
+#    "if (fb_va != 0)" / "if (base == NULL)" are dead guards, while the
+#    descriptor it asks for is installed by pmap_map() -> sptm_map_page(),
+#    whose result is only checked under __assert_only on this port. The mapping
+#    can be absent and the first store then takes a translation fault: an
+#    invisible death, because kprintf still has no console.
+#    v188 drops ml_io_map() for the console path. It claims a probed-EMPTY 1 GB
+#    slot above the TTBR1 base, points it at PA 0x80000000 as a single Device
+#    block (CACHE_ATTRINDX_DISABLE - the physmap is Normal cacheable, which is
+#    why v152/v184/v185 wrote DRAM that MDP5's DMA never observed) and derives
+#    the framebuffer VA from the same base, so "installed VA" and "written VA"
+#    cannot drift apart. Slot numbers come from T1SZ_BOOT and the ARM_TT_*
+#    masks, never from a hardcoded address - VM_MIN_KERNEL_ADDRESS moves when
+#    the pexpert config selects the CTRR/KTRR layout.
+#
+# 2) Registering a pe_serial_functions does not route kprintf to it.
+#    switch_to_serial_console() only switches when serial_console_enabled is
+#    set, and arm_init() leaves that FALSE because serial_init() enumerated no
+#    UART on this board. v188 sets the flag, clears disableConsoleOutput and
+#    switches the console over, so the log actually reaches fbcon.
+#
+# The text also moves from screen y 40 to screen y 960: with the bottom-up
+# panel that lands in fb rows 384..959, the only band ever proven visible here
+# (v177/v178 calibration said fb rows 8..972). v183's row 40 sat at fb rows
+# 1303..1895, outside the calibrated area.
+# zzz-g0245d-v188-fbcon-ttbr1-alias.patch
+# ^ PARKED. Reverted out of the tree and moved to workspace/tmp/parked/.
+#   It re-enables the framebuffer console on a probed-empty 1 GB TTBR1 slot -
+#   a separate experiment that must not ride along with v187, which is a pure
+#   confounder removal.
+#
+# v187: remove the three unconditional things that made every boot since v183
+# look dead. All three execute with no guard at all:
+#   1. osfmk/arm/arm_init.c g0245d_fb_blackout()  - floods all 6,220,800 bytes
+#      of the scanout buffer with black and cleans them to PoC, erasing the
+#      BOOT_MARK strips, PAINT 8..12, paint_stage(13..21) and the six white
+#      bars painted before it.
+#   2. osfmk/arm/arm_init.c g0245d_fbcon_start() - calls ml_io_map() in the
+#      arm_init() window, where io_submap does not exist yet, then writes
+#      "V183 FBCON OK" through whatever it got. It sits between fb_mark(2) and
+#      fb_mark(3), so a fault there masks the one signal we need.
+#   3. osfmk/kern/startup.c - 2000 x (g0245d_mmss_recover() + a 2,000,000
+#      iteration spin) and then g0245d_halt(), i.e. "msr daifset,#0xf; b .".
+#      This was the real end of every boot since v168: the kernel painted, then
+#      stopped itself. Nothing past machine_startup ever ran.
+# start.s is deliberately untouched: the loader screenshot prints
+# "ENTRY PA 0x95419488", so the kernel is loaded at PA 0x95004000 and
+# 0x95004000 >> 30 == 2 - the kernel's own L2 descriptor is at L1 index 2.
+# The v122 choice of L1 index 3 for the panel window is correct on this board.
+zzz-g0245d-v187-drop-confounders.patch
+
+# v188: move the framebuffer text console call from arm_init() (where
+# io_submap does not exist yet, so ml_io_map() hands out an unvalidated
+# mapping - an invisible death between fb_mark(2) and fb_mark(3)) to
+# startup.c, right after kernel_startup_initialize_upto(STARTUP_SUB_LOCKDOWN),
+# which is where STARTUP(KMEM, STARTUP_RANK_LAST, io_map_init) runs. The call
+# doubles as a probe: text on the panel means the lockdown init returned.
+# Also enables the serial_console_enabled gate + switch_to_serial_console() so
+# every later kprintf()/printf() lands on the panel, and moves FBCON_ROW0 from
+# 40 (fb rows 1303..1895, outside the proven-visible 8..972 range) to 960
+# (fb rows 384..959, inside it).
+zzz-g0245d-v188-fbcon-lockdown-text.patch
