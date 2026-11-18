@@ -709,3 +709,27 @@ zzz-g0245d-v187-drop-confounders.patch
 # 40 (fb rows 1303..1895, outside the proven-visible 8..972 range) to 960
 # (fb rows 384..959, inside it).
 zzz-g0245d-v188-fbcon-lockdown-text.patch
+
+# v189: fix the fbcon ROW0 coordinate bug. v188 wrote
+# (ROW0 + row) * 16 * SCALE, multiplying the 960 screen-row base by 32 as
+# well: y0 = 30720 for row 0, every y_screen lands past 1919, and
+# g0245d_fbcon_px()'s y_fb = 1919 - y_screen wraps as uint32_t so the
+# >= height guard silently discarded EVERY pixel - not even the
+# "V183 FBCON OK" proof-of-life reached the panel. The v188 photo indeed
+# shows only the v187-era paint_stage/fb_mark bands, no text at all.
+# Old ROW0 40 worked by accident: (40 + row) * 32 = 1280..1855 is a valid
+# screen range, so the historical "no text" failures were the call site
+# (ml_io_map before io_map_init), never this constant. Formula is now
+# ROW0 + row * 16 * SCALE: row 0 -> screen 960..991 -> fb 928..959,
+# row 17 -> fb 384..415, all inside the proven-visible fb 8..972.
+zzz-g0245d-v189-fbcon-row0-fix.patch
+
+# v190: fix the fbcon ml_io_map length. G0245D_FB_SIZE was 0x200000 (2 MiB),
+# which covers only fb rows 0..642, but fbcon row 0 lives at fb 928..959
+# (byte offset 3,006,720). fbcon_init() blanks row 0 FIRST, so the very
+# first pixel store was a data abort on unmapped device memory - before
+# switch_to_serial_console(), with no console alive: a perfectly silent
+# death. That is exactly what the v189 photo shows (frozen pre-fault frame,
+# zero fbcon pixels). The loader handoff line reports the reserved display
+# region as 0x23ff000; map that much so every fbcon row is inside the map.
+zzz-g0245d-v190-fbsize.patch

@@ -7,7 +7,7 @@
 # fb 行 8..972 区间）。补丁 patches/xnu/zzz-g0245d-v188-fbcon-lockdown-text.patch。
 set -uo pipefail
 
-D="$(cd "$(dirname "$0")/../../.." && pwd)"
+D="$(cd "$(dirname "$0")/../../../../.." && pwd)"
 UX="$D/src/unixnu-g0245d/unixnu-src"
 OUT="$UX/out/g0245d/ipados-17.7.11-21H461/g0245d"
 FD="$D/src/unixnu-g0245d/uefi-g0245d/Mu-Silicium/Build/g0245dPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd-bootshim"

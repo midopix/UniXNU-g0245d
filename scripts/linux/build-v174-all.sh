@@ -6,7 +6,7 @@
 # 日志定位；并把 v_width 归一化为 rowBytes/(depth>>3)=810，修正 console 按 1000 宽逐行溢出的品红。
 set -euo pipefail
 
-D="$(cd "$(dirname "$0")/../../.." && pwd)"
+D="$(cd "$(dirname "$0")/../../../../.." && pwd)"
 UX="$D/src/unixnu-g0245d/unixnu-src"
 OUT="$UX/out/g0245d/ipados-17.7.11-21H461/g0245d"
 V137="$D/workspace/tmp/g0245d-v137.img"
