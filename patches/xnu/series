@@ -733,3 +733,18 @@ zzz-g0245d-v189-fbcon-row0-fix.patch
 # zero fbcon pixels). The loader handoff line reports the reserved display
 # region as 0x23ff000; map that much so every fbcon row is inside the map.
 zzz-g0245d-v190-fbsize.patch
+
+# v191: fbcon ditches ml_io_map and borrows the loader page table like
+# fb_mark does. The v176 fb_mark history comment already recorded what photos
+# proved: ml_io_map / pmap_map_bd silently fail on this board (no SPTM -
+# sptm_map_page()'s result is only checked by __assert_only), and the physmap
+# is Normal cacheable so its stores never reach DRAM. pmap_map() leaves the
+# PTE unwritten, so the first fbcon_init() store took a data abort: the
+# perfectly silent death frozen into the v189/v190 photos. The ONE painter
+# with photo proof is the TTBR0 borrow through the loader identity window
+# 0xC3401000 (VA -> PA 0x83401000). fbcon now: fbcon_start checks
+# g0245d_ttbr0_loader (no ml_io_map at all), fbcon_px writes straight into
+# the identity window, and every fb-touching entry point (init, putc) wraps
+# its work in one TTBR0 push/pop with the same full TLBI fb_mark has proven
+# safe in photos since v176. Proof-of-life strings updated to V191.
+zzz-g0245d-v191-fbcon-ttbr0.patch

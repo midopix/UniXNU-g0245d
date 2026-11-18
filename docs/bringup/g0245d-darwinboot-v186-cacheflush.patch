@@ -1,0 +1,221 @@
+diff --git a/DarwinBootPkg/Driver/DarwinBoot.c b/DarwinBootPkg/Driver/DarwinBoot.c
+index c3993a9..5885702 100644
+--- a/DarwinBootPkg/Driver/DarwinBoot.c
++++ b/DarwinBootPkg/Driver/DarwinBoot.c
+@@ -44,6 +44,36 @@ VOID EFIAPI DarwinEnter (UINT64 Args, UINT64 Entry, UINT64 Memory, UINT64 Size,
+ 
+ #define READ_SYSREG(Name)  ({ UINT64 Value_; __asm__ volatile ("mrs %0, " #Name : "=r" (Value_)); Value_; })
+ 
++//
++// g0245d v186: SimpleFbDxe keeps the carveout CACHEABLE (write-back) and relies
++// on the per-blit WriteBackInvalidateDataCacheRange inside FrameBufferGopBlt to
++// push pixels to DRAM.  Every raw write this driver made to the frame buffer --
++// PaintBand and every hand-off bar -- therefore stayed in the D-cache and never
++// reached the scanout, which is why thirty versions of "paint a colour and look"
++// showed nothing.  Any raw paint MUST be followed by this flush.  Runs with the
++// MMU on, so VA == PA holds for the identity-mapped carveout.
++//
++STATIC
++VOID
++FlushFb (
++  IN UINT8  *Base,
++  IN UINTN  Bytes
++  )
++{
++  UINT64  Line;
++  UINT64  Start;
++  UINT64  End;
++
++  if ((Base == NULL) || (Bytes == 0)) { return; }
++  Line  = 4ULL << ((READ_SYSREG (ctr_el0) >> 16) & 0xF);
++  Start = (UINT64)(UINTN)Base & ~(Line - 1);
++  End   = (UINT64)(UINTN)Base + Bytes;
++  for (; Start < End; Start += Line) {
++    __asm__ volatile ("dc civac, %0" :: "r" (Start) : "memory");
++  }
++  __asm__ volatile ("dsb sy" ::: "memory");
++}
++
+ STATIC UINT32 U32 (CONST VOID *P) { return ReadUnaligned32 ((CONST UINT32 *)P); }
+ STATIC UINT64 U64 (CONST VOID *P) { return ReadUnaligned64 ((CONST UINT64 *)P); }
+ 
+@@ -501,6 +531,11 @@ PaintBand (IN CONST UINT64 Video[6], IN BOOLEAN Red)
+       CopyMem (Fb + Mirror * Stride + Col * Bpp, Pattern, Bpp);
+     }
+   }
++  //
++  // v186: without this the band is written into the D-cache only (SimpleFbDxe
++  // keeps the carveout write-back) and the panel keeps the stale menu pixels.
++  //
++  FlushFb (Fb, Stride * Height);
+ }
+ 
+ STATIC
+@@ -1029,6 +1064,15 @@ Boot (
+     DiagDraw (Line, 1);
+     UnicodeSPrint (Line, sizeof (Line), L"KERNEL VA 0x%lx  END 0x%lx", Kernel.Base, Kernel.End);
+     DiagDraw (Line, 2);
++    //
++    // v186: the one number a hand-off failure hinges on, in type large enough to
++    // read back from a photograph.  DarwinEnter only clears SCTLR_EL1.M/C/I, so
++    // if anything here is unexpected the branch runs with the wrong translation
++    // regime and the kernel never executes.
++    //
++    UnicodeSPrint (Line, sizeof (Line), L"EL %lu  SCTLR 0x%lx  USED 0x%lx",
++                   (UINT64)(DarwinCurrentEl () >> 2), READ_SYSREG (sctlr_el1), (UINT64)Used);
++    DiagDraw (Line, 4);
+     for (Second = 12; Second > 0; Second--) {
+       UnicodeSPrint (Line, sizeof (Line), L"%lu  HANDOFF IN %lu s - PHOTO NOW",
+                      (UINT64)(13 - Second), (UINT64)Second);
+@@ -1046,8 +1090,19 @@ Boot (
+     }
+     Status = gBS->ExitBootServices (mImage, Key);
+     if (!EFI_ERROR (Status)) {
++      //
++      // v186: green bands at BOTH screen edges, now actually flushed to DRAM.
++      // Seeing them proves ExitBootServices returned and the raw-write channel
++      // works; seeing nothing means the hand-off died before this line.
++      //
+       PaintBand (Video, FALSE);
+-      DarwinEnter (ArgsAddress, Address + Kernel.Entry - Kernel.Base, Address, WindowSize, Video[0], Video[2] * Video[4]);
++      //
++      // Only the bytes this loader actually wrote need to reach DRAM before the
++      // kernel fetches with the MMU off.  Cleaning the whole 56 MiB window also
++      // walks pages past TopOfKernelData that the firmware may not have mapped,
++      // and a data abort inside the clean loop hangs the hand-off silently.
++      //
++      DarwinEnter (ArgsAddress, Address + Kernel.Entry - Kernel.Base, Address, Used, Video[0], Video[2] * Video[4]);
+       CpuDeadLoop ();
+     }
+     if (Status != EFI_INVALID_PARAMETER) {
+diff --git a/DarwinBootPkg/Driver/Entry.S b/DarwinBootPkg/Driver/Entry.S
+index a7a55c2..48e52c2 100644
+--- a/DarwinBootPkg/Driver/Entry.S
++++ b/DarwinBootPkg/Driver/Entry.S
+@@ -5,24 +5,70 @@ ASM_FUNC(DarwinCurrentEl)
+   mrs x0, CurrentEL
+   ret
+ 
+-// x0=boot_args PA, x1=entry PA, x2=owned PA, x3=owned size, x4=frame buffer
+-// PA (0 for none), x5=its size in bytes. EL1 only.
++// x0=boot_args PA, x1=entry PA, x2=owned PA, x3=owned bytes actually written
++// (v186: this used to be the whole 56 MiB window; cleaning past
++// TopOfKernelData walks pages the firmware may not have mapped and a data
++// abort there hangs the hand-off with no output at all), x4=framebuffer PA
++// (0 for none), x5=its size in bytes. EL1 only.
++//
++// Two probe stages inside DarwinEnter, because they answer different questions:
++//
++//   stage A (MMU still on)  solid blue band at frame buffer row 480, byte-wise
++//                           so the (G,R,B) panel shows true blue.  Before it
++//                           the frame buffer is explicitly flushed, because
++//                           SimpleFbDxe keeps the carveout write-back and a raw
++//                           paint without the flush never reaches the panel --
++//                           that is why every earlier "paint and look" version
++//                           showed nothing.  Blue means ExitBootServices
++//                           returned and the flush path works.
++//   stage B (MMU off)       solid red band at row 960 with the translation
++//                           regime the kernel will run under.  With SCTLR_EL1.M
++//                           clear every store is Device-nGnRnE and lands in DRAM
++//                           directly, so red cannot be lost to the cache.  Red
++//                           means the branch to the kernel is next.
++//
+ ASM_FUNC(DarwinEnter)
+   msr daifset, #15
+-  // Paint the top 1/16 of the framebuffer green (BGRA 0xFF00FF00)
+-  // before cache maintenance, MMU shutdown and the branch to the kernel.
+-  cbz x4, 2f
+-  lsr x9, x5, #4
+-  bic x9, x9, #7
+-  mov w10, #0xFF00
+-  movk w10, #0xFF00, lsl #16
+-  mov x11, x4
++  mov x16, x4                       // keep the frame buffer across the stages
++  mov x17, x5
++
++  // ---- stage A: solid blue band at frame buffer row 480, 32 rows ----
++  // Panel bytes are (G, R, B), so blue is 00 00 FF.
++  cbz x16, 2f
++  ldr x10, [x0, #0x38]              // v_rowBytes
++  cbz x10, 2f
++  mov x11, #480
++  mul x10, x11, x10
++  add x9, x16, x10
++  ldr x10, [x0, #0x38]
++  mov x11, #32
++  mul x12, x11, x10
++  mov w13, #0x00
++  mov w14, #0x00
++  mov w15, #0xFF
+ 3:
+-  stp w10, w10, [x11], #8
+-  subs x9, x9, #8
++  strb w13, [x9], #1
++  strb w14, [x9], #1
++  strb w15, [x9], #1
++  subs x12, x12, #3
+   b.hi 3b
+   dsb sy
++  mrs x6, ctr_el0
++  ubfx x6, x6, #16, #4
++  mov x7, #4
++  lsl x6, x7, x6
++  sub x7, x6, #1
++  bic x11, x16, x7
++  add x12, x16, x17
++4:
++  dc civac, x11
++  add x11, x11, x6
++  cmp x11, x12
++  b.lo 4b
++  dsb sy
+ 2:
++
++  // ---- clean the bytes the loader copied, so the kernel sees them ----
+   add x5, x2, x3
+   mrs x6, ctr_el0
+   ubfx x6, x6, #16, #4
+@@ -40,13 +86,43 @@ ASM_FUNC(DarwinEnter)
+   ic iallu
+   dsb sy
+   isb
++
++  // ---- drop the MMU, the data cache, the instruction cache ----
++  // A/SA/SA0 are cleared as well: with M clear every access is Device-nGnRnE,
++  // where an unaligned access faults, and firmware that left SCTLR_EL1.A set
++  // would fault on the kernel's first packed load.
+   mrs x4, sctlr_el1
+   bic x4, x4, #1
++  bic x4, x4, #2
+   bic x4, x4, #4
++  bic x4, x4, #0x18
+   bic x4, x4, #0x1000
+   msr sctlr_el1, x4
+   isb
+   tlbi vmalle1
+   dsb sy
+   isb
++
++  // ---- stage B: solid red band at frame buffer row 960, 32 rows ----
++  // Bytes are (G, R, B) on this panel, so red is 00 FF 00.
++  cbz x16, 6f
++  ldr x10, [x0, #0x38]              // v_rowBytes
++  cbz x10, 6f
++  mov x11, #960
++  mul x10, x11, x10
++  add x9, x16, x10
++  ldr x10, [x0, #0x38]
++  mov x11, #32
++  mul x12, x11, x10
++  mov w13, #0x00
++  mov w14, #0xFF
++  mov w15, #0x00
++5:
++  strb w13, [x9], #1
++  strb w14, [x9], #1
++  strb w15, [x9], #1
++  subs x12, x12, #3
++  b.hi 5b
++  dsb sy
++6:
+   br x1
