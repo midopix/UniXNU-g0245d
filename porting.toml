@@ -4,12 +4,12 @@ schema_version = 1
 name = "g0245d"
 soc = "MSM8996"
 os_profile = "ipados-17.7.11-21H461"
-summary = "Gree G0245D (格力手机·色界) port: Snapdragon 820, 4 GB LPDDR4, 64 GB UFS 2.0, Adreno 530, MDP5. Offline chain complete as of 2026-11-07. UEFI overlay v103 contains the full payload discovery chain (UniXNURamDiskDxe + DarwinBoot), builds under RELEASE_CLANGPDB, is byte-verified inside the LZMA-wrapped FV and packs into workspace/tmp/g0245d-v103.img (not yet flashed). XNU kernel.macho and a full prelinked kernelcache are produced; NativeUfs8996, Blsp8996 and Adreno530 are force-loaded via CONFIG_XNU_EXTRA_LD_ARCHIVES and verified with linkarchives + llvm-nm, and their ADT nodes (ufshc/gpu/blsp2-i2c6) are now enabled in dts/g0245d.dts. Source review closed two historic 'device patch' items: GICv3 3-cell and SMMUv2 have no XNU core code gap. The four MSM8996 components are read-only register probes, NOT working storage/I2C/GPU drivers; runtime_qualified stays False by design. Every remaining item requires a device flash: timer INTID fix (29/30/27/26), payload handoff, MMIO read safety, and real UFS/I2C/GPU/SMMU/MDP5 bring-up."
+summary = "Gree G0245D (格力手机·色界) port: Snapdragon 820, 4 GB LPDDR4, 64 GB UFS 2.0, Adreno 530, MDP5. Hardware inventory complete from the stock QFIL package (board.dtb, boot.img, rawprogram XML, firmware blobs); repository bootstrap done; no host build or device observation yet."
 
 [[area]]
 id = "configuration"
 status = "in-progress"
-components = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "XnuPrelink", "DarwinBoot", "NativeUfs8996", "Blsp8996", "Adreno530", "Msm8996Platform"]
+components = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "XnuPrelink", "DarwinBoot"]
 paths = ["board.toml", "feeds.toml", "configs/**", "dts/**", ".gitignore", "README.md"]
 inputs = [
   "Stock QFIL package G0245D_Gree_user_QFIL_images.zip (2.6 GB) extracted: 573 files, incl. vmlinux 193 MB with symbols, boot.img, xbl.elf, M8996AAAAAAAAQ1234.elf, prog_ufs_firehose_8996_ddr.elf, NON-HLOS.bin 83 MB, splash.img, rawprogram_unsparse*.xml, gpt_main*.bin.",
@@ -19,9 +19,7 @@ inputs = [
 configuration = [
   "board.toml selects soc=msm8996, os_profile=ipados-17.7.11-21H461, payload volume G0245D, dram_size 0x100000000, chip_id 820.",
   "dts/g0245d.dts includes msm8996.dtsi, 4 GB memory at 0x80000000, cpu0-only stage 1, real splash_region 0x83401000/0x23ff000.",
-  "configs/g0245d_defconfig enables the stage 1 minimal kernel set and CONFIG_XNU_EXTRA_LD_ARCHIVES = three -Wl,-force_load entries for libNativeUfs8996.a / libBlsp8996.a / libAdreno530.a. Any defconfig edit requires ./unixnu defconfig g0245d_defconfig -D ../UniXNU-g0245d to refresh the cached out/.../.config.",
-  "board.toml [components].include and the FULL [kernel].archives list enable the four MSM8996 components; lists are replaced (not merged) by profiles.py, so the device layer must carry the whole list.",
-  "dts/g0245d.dts enables &ufshc, &gpu and &blsp2_i2c6 with status = \"okay\". devicetree.py only exports enabled nodes carrying unixnu,adt-name, so without these overrides the three linked drivers have no IOPlatformDevice nub to match. Verified offline: ADT arm-io exports intc, ufshc, gpu, rpm-msg-ram, tcsr-mutex, blsp2-i2c6 with ranges 0x0/0xa000000.",
+  "configs/g0245d_defconfig enables the stage 1 minimal kernel set.",
   "kernel_args extended with console=ttyHSL0,115200,n8 (stock cmdline, BLSP2 UART2).",
 ]
 procedure = [
@@ -30,31 +28,22 @@ procedure = [
   "Extracted board.dtb from boot.img and transcribed board facts into dts/ and porting.toml.",
 ]
 findings = [
-  "MSM8996 GICv3 uses #interrupt-cells = <3> (SM8550 uses 4). Source review (2026-11-07) found NO XNU core gap: IODTMapOneInterrupt resolves specifier width from #interrupt-cells at runtime and ArmCpu never reads node interrupts (PSCI + direct GIC MMIO). No gic-v3-3cell patch exists or is needed; enabling cpu1..cpu3 is now purely a device-observation task.",
+  "MSM8996 GICv3 uses #interrupt-cells = <3> (SM8550 uses 4): ArmCpu 3-cell path must be verified before enabling secondary CPUs.",
   "ShengUfs (UFS 3.x/4.x), Adreno740/AdrenoMetal (A7xx), DPU display and GENI serial do not cover MSM8996; new components are required (NativeUfs8996, Adreno530, Mdp5, BlspI2c).",
   "Stock kernel is Linux 3.18.20-perf (GCC 4.9, 2018-11-16) — a vendor CAF tree, not mainline; board.dtb is the authoritative hardware description.",
-  "The firmware side does not come from the UniXNU tree for this board: Mu-Silicium has no msm8996 silicon package, so the platform lives in the separate uefi-g0245d repository as Platforms/Gree/g0245dPkg and is consumed through [firmware] in board.toml. board.toml keeps dsc, fd and packages pointing at that overlay.",
-  "Host build is Linux, not Windows. The tree uses CLANGPDB with LLVM/lld 21.1.8 everywhere; DeviceBuild.py:166 overrides Conf/target.txt, so a toolchain switch that only edits target.txt produces a silently stale FD under RELEASE_CLANGDWARF (see docs/pitfalls.md).",
 ]
 completion = [
   "SoC feed pinned to a reviewed commit; status shows the intended overrides and patch order; no REQUIRED_ placeholders remain.",
 ]
 limits = [
-  "The four MSM8996 components are local read-only register probes, not upstream drivers. They map MMIO, read identification registers and publish IORegistry diagnostics; they do NOT enable clocks, issue UFS UIC/UTP commands, run I2C transactions, submit GPU work or drive MDP5/DSI. Adreno530 additionally publishes Adreno530OffsetsQualified = false because the A5xx RBBM offsets are unqualified.",
-  "Each probe reports success only when its hard-wired identification register is plausible (non-zero / not all-ones). A failed probe records a failure string, sets ...Probed = false and does NOT registerService(). This removes the earlier unconditional 'Probed = true' false success.",
-  "Msm8996Platform is an embedded build-stage kit (no archive, not linked); every power/clock/SMMU/display entry point still returns -1 and msm8996_platform_capabilities() returns 0.",
-  "runtime_qualified / loadable / abi_qualified / instruction_relocation_complete / register_dataflow_qualified are hard-coded False in the XnuPrelink emitter and asserted False by its unit tests. This is an honest 'experimental candidate' declaration and must NOT be flipped offline.",
-  "The board package is consumed as an overlay on a pinned Mu-Silicium checkout; uefi-g0245d itself is not a full EDK II tree.",
+  "feeds.toml still pins REQUIRED_SOC_COMMIT; no host build yet.",
 ]
 next_action = [
-  "Flash workspace/tmp/g0245d-v103.img and observe the menu countdown (timer INTIDs 29/30/27/26), the payload FAT enumeration and the DarwinBoot handoff.",
-  "On the first XNU boot, read the three probes' IORegistry diagnostics (UFS8996/BLSP8996/Adreno530 Registers, Status, Failure, ProbeScope) and check whether any newly enabled MMIO node raises a synchronous abort. If so, gate the reads behind GCC clock enables rather than enabling more nodes.",
-  "Only after the above: real UFS 2.0 link start-up, QUP v2 I2C transfers, A5xx clock/power + TRM-verified registers, SMMUv2 context banks, and MDP5/DSI0 ft8716 scanout. All are hardware-qualification tasks, not offline patches.",
+  "Pin the SoC commit; run scripts/extract-files.py output through the Mu-Silicium platform draft.",
 ]
 evidence = [
   "firmware/extracted/G0245D_Gree_user_QFIL_images/board.dtb (341047 bytes) -> board.dts (16530 lines).",
   "README.md, AGENTS.md, LICENSE, scripts/, patches/xnu/series, REA-WORKFLOW.md added.",
-  "uefi-g0245d: PlatformBuild.py runs from Platforms/Gree/g0245dPkg with PACKAGES_PATH covering {uefi}, UniXNUPkg, DarwinBoot and Mu_Basecore; AARCH64 RELEASE_CLANGPDB.",
 ]
 
 [[area]]
@@ -78,17 +67,10 @@ findings = [
   "vmlinux (Linux 3.18.20-perf, AArch64 EXEC, entry 0xffffffc000080000) symbol pass: cnss_pci.c (PCIe WLAN), ufs_qcom phy init/vreg helpers, mdss_mdp.c, kgsl (Adreno), synaptics_dsx_i2c + synaptics_rmi4_i2c, fts_ts (both touch drivers compiled; DTS selects synaptics@20), panel driver candidates nt35596/tm23_g..tm30_g compiled but DTS selects ft8716.",
   "boot.img kernel slot DTB table (2026-10-25): after the gzip stream (8399161 B, decompressing to a 26375904 B ARM64 Image with text_offset 0x80000 (real kernel text at 0x80008000+0x80000=0x80088000, clear of the appended-DTB region 0x80000100-0x800536F7), image_size 0x1b88000, magic 'ARMd') follow 90 concatenated FDTs (330177-349324 B each, 30944820 B total, no table header). The 90 trees are the Qualcomm MSM8996/APQ8096 reference-board family (FLUID, CDP, MTP, LiQUID, DragonBoard, ... variants); FDT#0 is 'MSM 8996 v3.0 FLUID' (msm-id 0xf6/0x30000, board-id 0x03/0x00, pmic-id 0x20009/0x2000a/0/0) and is byte-identical to the standalone board.dtb. aboot strings confirm the matcher: 'ERROR: Couldn't find the suitable DTB!', 'qcom,pmic-id(%d) or qcom,board-id(%d) in device tree is not a multiple of (%d %d)', 'Failed to move/resize dtb buffer', 'Device tree addresses overlap with aboot addresses.'.",
   "xbl.elf XBL/UEFI memory map (string table, 32 entries; embedded __FILE__ path QcomPkg/XBLCore/UefiPlatCfg.c) resolves the firmware DDR carveouts: HLOS 0 0x80100000-0x80200000, XBL's own UEFI FD 0x80200000-0x80300000, Display Reserved 0x80400000-0x80C00000 (8 MB, XBL early framebuffer), HLOS 2 0x84000000-0x85800000, HYP 0x85800000-0x85E00000, SMEM 0x86000000-0x86200000, TZ 0x86400000-0x86600000, Stargate 0x87400000-0x88800000, PIL_REGION 0x88800000-0x90F00000 (135 MB = modem/ADSP/venus/MBA/wlan). No separate fixed GPU (Adreno) carveout exists; GPU memory is carved at runtime via KGSL/PIL inside PIL_REGION - the 'GPU/venus/mba carveout' open item is closed.",
-  "SPMI DXE had to be restored from the device's own firmware. `Binaries/g0245d` is a git submodule and the board-side changes live only in that submodule's worktree, so a source-only checkout stops at \"SPMI.inf is not found\". Recovery chain from the QFIL xbl.elf: top-level FV at 0xC0010 -> FFS 9E21FD93-9C72-4C15-8C4B-E77F1DB2D792 -> EFI_SECTION_GUID_DEFINED EE4E5898-3914-4259-9D6E-DC7BD79403CF (LZMA) -> inner FV -> FFS 2A7B4BEF-80CD-49E1-B473-374BA4D673FC, PE32+ AArch64 section, 30240 bytes, DXE_DEPEX 06 08 (TRUE), sha256 95d74428... Two independent paths (hand-written FV walk and rea inspect-artifact) produced byte-identical output. The image is vendor code: it is listed in proprietary-files.txt by hash and stays out of Git.",
-  "Firmware build is green on Linux: AARCH64 RELEASE_CLANGPDB, 0058 Images Verified, PROGRESS - Success, exit 0, about 55 s. The FD is exactly 0x300000 bytes. Verifying that new C code reached the FD cannot be done by searching the .fd: FVMAIN sits inside an LZMA GUIDed section, so the only valid check is decompressing that section and comparing the extracted PE32 against the build output (scripts/verify-fd-unixnu.py). Done that way, AARCH64/UniXNU.efi (87040 bytes) is byte-identical to the copy inside the FD.",
 ]
 completion = ["Firmware image builds, enters UniXNU, publishes the framebuffer and preserves the documented reservations."]
-limits = [
-  "Vendor DXE images (SPMI and friends) are not in Git; a fresh checkout must restore them from the QFIL package into Binaries/g0245d before building (scripts/restore-vendor-dxe.py).",
-  "Ghidra must load emmc_appsboot.mbn as raw binary: base 0x91600000, image = file[0x8000:] (Qualcomm MBN ELF32 format, not a corrupt ELF64) — per-Ghidra BootShim contract now captured in the packaging area.",
-  "aboot boot_verifier is non-fatal on a locked retail device (unsigned boot.img still boots); unlock skips verification. QFIL/E DL remains the flashing/bypass path if the boot partition is protected.",
-  "The old \"drivers 0 loaded / no boot entry found\" symptom was caused by a missing payload discovery chain. v103 FIXED it: UniXNURamDiskDxe and DarwinBoot are in both the DSC and FDF, DarwinBootPkg is on PACKAGES_PATH, DiskIoDxe/PartitionDxe/Fat are present, and apply-overlay.sh now applies persistent patch 0002 to the Mu root (not Mu_Basecore). RELEASE_CLANGPDB build passed with 0061 Images Verified; FD stays 0x300000; verify-fd-unixnu.py byte-compared both new PE32 images out of the LZMA-wrapped inner FV; workspace/tmp/g0245d-v103.img (39,354,700 B) was packed. Build-time verification does NOT prove the SEC HOB, BlockIo publication, FAT enumeration or handoff — those remain device-only observations.",
-]
-next_action = ["Flash v103 (timer INTIDs 29/30/27/26 are already in the FD) and confirm the countdown advances, the payload FAT volume is enumerated, unixnu.toml is read and DarwinBoot hands off. Only then re-enable cpu1..cpu3 behind the 3-cell GIC check."]
+limits = ["Mu-Silicium msm8996 platform package does not exist yet; port from the closest MSM8996 UEFI reference.", "Ghidra must load emmc_appsboot.mbn as raw binary: base 0x91600000, image = file[0x8000:] (Qualcomm MBN ELF32 format, not a corrupt ELF64) — per-Ghidra BootShim contract now captured in the packaging area.", "aboot boot_verifier is non-fatal on a locked retail device (unsigned boot.img still boots); unlock skips verification. QFIL/E DL remains the flashing/bypass path if the boot partition is protected."]
+next_action = ["aboot BootShim contract confirmed in Ghidra (see packaging area). Draft the msm8996 Mu-Silicium UEFI platform package and build BootShim stage 1. XBL memory map resolved (32-entry table extracted; FD_BASE=0x92000000 confirmed free); framebuffer GOP handoff base = cont_splash_mem@0x83401000 (1080x1920 RGB888)."]
 evidence = [
   "readelf -h/-l/-S on xbl.elf (17 program headers, no sections) and M8996AAAAAAAAQ1234.elf (8 LOAD segments, entry 0xb0100000).",
   "python struct parse of emmc_appsboot.mbn header + ANDROID! @0x7e168 context; strings grep for boot_verifier/VERIFIED_BOOT_SIG/DTB.",
@@ -100,29 +82,18 @@ evidence = [
 
 [[area]]
 id = "cpu"
-status = "in-progress"
+status = "planned"
 components = ["ArmCpu"]
 paths = ["dts/g0245d.dts", "configs/g0245d_defconfig"]
-inputs = ["4x Kryo 280 (Cortex-A72 class), MPIDR 0x0/0x1/0x100/0x101, PSCI smc, GICv3 3-cell specifiers, 19.2 MHz timebase.", "GIC distributor 0x9bc0000, redistributors 0x9c00000; EL1 physical timer PPI 14 in the device tree, i.e. GIC INTID 30."]
-configuration = ["cpu0 enabled in stage 1; cpu1..cpu3 disabled until the GIC 3-cell check passes.", "PcdArmArchTimer{Sec,Intr,Virt,Hyp}IntrNum = 29/30/27/26 (GIC INTIDs) on top of the 19.2 MHz PcdTimerFreqOverwrite."]
+inputs = ["4x Kryo 280 (Cortex-A72 class), MPIDR 0x0/0x1/0x100/0x101, PSCI smc, GICv3 3-cell specifiers, 19.2 MHz timebase."]
+configuration = ["cpu0 enabled in stage 1; cpu1..cpu3 disabled until the GIC 3-cell check passes."]
 procedure = ["Build with cpu0-only; enable secondaries one at a time; verify IPI/timer per core."]
-findings = [
-  "Timer interrupts were registered on the wrong INTIDs, and that single defect explains both observed symptoms. ArmPkg declares PcdArmArchTimer{Sec,Intr,Virt,Hyp}IntrNum as GIC INTIDs (defaults 29/30/26/27) and TimerDxe.c passes the PCD straight to RegisterInterruptSource() with no +16; Msm8996Pkg.dsc.inc carried 13/14/11/10, which is the device-tree PPI index. PPI 13/14 map to INTID 29/30, so the handler sat on SGI 13/14 while the EL1 physical timer raised INTID 30. TimerInterruptHandler therefore never ran, mTimer.Ticks never advanced, and every EVT_TIMER consumer stalled at once: the BDS countdown froze at 10 s and KeypadDxe's 20 ms debounce/repeat never fired, so the panel showed a frozen countdown and the keys looked dead. PcdTimerFreqOverwrite had already been fixed to 19200000 and was confirmed present in AutoGen.c while the symptom did not change — the frequency was never the cause.",
-  "The PPI-vs-INTID question is decidable offline, before a flash. Disassembling the built TimerDxe image shows the four PCD values as immediates: v99 carried mov w20,#0xe / w21,#0xd / w1,#0xb / w22,#0xa (14/13/11/10), v100 carries #0x1e / #0x1d / #0x1b / #0x1a (30/29/27/26). This is the cheapest acceptance test for any change to these PCDs.",
-  "Do not copy the other Qualcomm platforms in Mu-Silicium. Hana, Rennell, Nazgul, Starlord, Strait, Napali and Kamorta all set PcdArmArchTimerSecIntrNum|17 and PcdArmArchTimerIntrNum|18 (PPI 1/2, neither the ARM standard nor the 8996 mapping), and Strait additionally sets VirtIntrNum 30. Those are further instances of the same mistake; ArmPkg.dec's own defaults are the only correct reference in this tree.",
-  "The vendor firmware uses the generic ArmPkg timer on this SoC, which is what makes the standard mapping applicable. The QFIL xbl.elf contains ArmGicDxe (DE371F7C-DEC4-4D21-ADF1-593ABCC15882) and TimerDxe (F099D67F-71AE-4C36-B2A3-DCEB0EB2B7D8), and the debug strings in those images still carry the source path MSM8996_1031/boot_images/ArmPkg/Library/ArmArchTimerLib/ArmArchTimerLib.c. There is no vendor-private msm8996 timer driver to reconcile against.",
-  "The device tree and Linux agree with the standard mapping: msm8996.dtsi declares interrupts = <1 13 8>, <1 14 8>, <1 11 8>, <1 10 8>, i.e. PPIs 13/14/11/10, and the stock Linux kernel drives the same timer on INTID 29/30/27/26.",
-]
+findings = ["Collect the per-CPU entry observation and the GIC specifier behavior."]
 completion = ["Every enabled CPU reaches its entry checkpoint and timer/IPI handling works on each enabled CPU."]
-limits = ["Source review (2026-11-07) found no 3-cell GIC code gap: IODTMapOneInterrupt uses #interrupt-cells dynamically and ArmCpu does not read node interrupts. cpu1..cpu3 stay disabled only until SMP bring-up is observed on hardware, not because a patch is missing.", "The timer INTID fix is built into v100 and later (latest: v103) but has not yet been observed on hardware; the last flashed image (v98) predates it."]
-next_action = ["Flash v103 and read the menu: an advancing countdown and live keys confirm the fix; if the countdown still stalls, the v99 diagnostic line already reports CPU/HW/IRQ/TMR/PCT so the failing layer is visible."]
+limits = ["GICv3 3-cell specifier support in ArmCpu unverified."]
+next_action = ["Run scripts/check-gic-cells.sh against the ADT converter once a host build exists."]
 evidence = [
   "board.dts cpu nodes: compatible 'arm,cortex-a72','qcom,kryo'; reg <0 0x0>/<0 0x1>/<0 0x100>/<0 0x101>; enable-method 'qcom,psci'.",
-  "ArmPkg/ArmPkg.dec:270-275 declares the four PcdArmArchTimer*IntrNum PCDs with defaults 29/30/26/27 and documents them as GIC PPI numbers.",
-  "ArmPkg/Drivers/TimerDxe/TimerDxe.c:394 reads PcdGet32 (PcdArmArchTimerIntrNum) and calls RegisterInterruptSource with that value unchanged; ArmPkg/Drivers/ArmGicDxe/GicV3/ArmGicV3Dxe.c routes only INTID >= 16 through the GICR path.",
-  "llvm-objdump -d on AARCH64/ArmPkg/Drivers/TimerDxe/TimerDxe/DEBUG/ArmTimerDxe.dll before and after the change: 0xe/0xd/0xb/0xa -> 0x1e/0x1d/0x1b/0x1a.",
-  "workspace/tmp/xbl-extract/volume-0/file-9e21fd93-.../section0/section1/volume-ee4e5898-.../file-f099d67f-.../section1.pe is the vendor TimerDxe; the same directory holds the vendor ArmGicDxe.",
-  "docs/timer-ppi-finding.md records the full derivation, the counter-evidence from the other Qualcomm platforms and the vendor-firmware cross-check.",
 ]
 
 [[area]]
@@ -158,8 +129,8 @@ evidence = [
 [[area]]
 id = "storage"
 status = "in-progress"
-components = ["NativeUfs8996"]
-paths = ["scripts/extract-qfil.sh", "board.toml", "dts/g0245d.dts"]
+components = []
+paths = ["scripts/extract-qfil.sh", "board.toml"]
 inputs = [
   "UFS 2.0 controller ufshc@624000, PHY ufsphy@627000, SPI 265; 64 GB part; stock GPT from the QFIL rawprogram XML (4096 B sectors, multi-LUN).",
   "Partition geometry from rawprogram_unsparse*.xml (scripts/extract-files.py): userdata LBA 74312..14526452 (55.13 GiB), system 56074..842457 (3.00 GiB), boot 39690..56073 (64 MiB), persist 8..1180, cache 8200..40986; board.toml now carries the real userdata window.",
@@ -169,8 +140,8 @@ configuration = ["userdata LBA geometry 74312..14526452 recorded in board.toml f
 procedure = ["Implement NativeUfs8996 (UFS 2.0 register set, not ShengUfs); then verify capacity, GPT and known blocks."]
 findings = ["Collect the first link-up and command-completion observation."]
 completion = ["Host: register, clock, link and SMMU facts match the board inventory. Reads: SCSI capacity, GPT and known blocks are correct; OS/SystemOS windows stay within userdata. Root: the configured volume mounts and launchd starts."]
-limits = ["NativeUfs8996 is linked into kernel.macho (force_load, verified by linkarchives + llvm-nm) and its ADT node ufshc is enabled, but it is a READ-ONLY register probe. It reads CAP/VER/HCPID/HCMID/AHIT/IS/IE/HCTRL, rejects degenerate CAP/VER, publishes UFS8996Registers/Status/Failure/ProbeScope and never writes HCTRL or issues UIC/UTP commands. No UFS 2.0 transport driver exists in the UniXNU catalog."]
-next_action = ["Flash v103 and read UFS8996Registers / UFS8996Status / UFS8996Failure on the device first: this decides whether the MMIO is even safe to touch. Then port the UFS 2.0 init sequence from the stock kernel driver (offsets >= 0x30 must be re-verified against the MSM8996 UFSHCI IP), inventory clocks/resets from the QFIL GCC table, and parse gpt_main*.bin to confirm the on-device GPT matches the rawprogram extents."]
+limits = ["No UFS 2.0 driver exists in the UniXNU catalog; this is the largest stage 2 component."]
+next_action = ["Port the UFS 2.0 init sequence from the stock kernel driver; inventory clocks/resets from the QFIL GCC table; parse gpt_main*.bin to confirm the on-device GPT matches the rawprogram extents."]
 evidence = [
   "rawprogram_unsparse*.xml and gpt_main*.bin parsed; firehose programmer prog_ufs_firehose_8996_ddr.elf present.",
   "firmware/g0245d-firmware.json carries the per-partition LBA table.",
@@ -179,7 +150,7 @@ evidence = [
 [[area]]
 id = "display"
 status = "in-progress"
-components = ["Adreno530", "Msm8996Platform"]
+components = []
 paths = ["dts/g0245d.dts", "dts/panel-ft8716.txt", "board.toml"]
 inputs = [
   "MDP5 mdss@900000, mdp@901000, DSI0 dsi@994000, DSI PHY 28nm@994400.",
@@ -189,13 +160,13 @@ inputs = [
 configuration = ["Stage 1 uses the firmware framebuffer (GOP handoff) via GopFramebuffer; splash_region 0x83401000/0x23ff000 now recorded in board.toml and dts."]
 procedure = ["Read the ABL framebuffer log for base/size/stride; enable GopFramebuffer; then implement Mdp5 native path with dts/panel-ft8716.txt."]
 findings = [
-  "Known frame observed on hardware: the UniXNU menu renders on the real ft8716 panel through the GOP handoff on every flash from v97 on, with correct 1080x1920 geometry and readable text. The scanout the stock LK/ABL leaves behind is 24 bpp (qcom,mdss-dsi-bpp 0x18), stride 3240 B, 6.2 MB of the 36 MB carveout; that is the configuration GopFramebuffer publishes, not the 32 bpp/4352 B stride the Android kernel reprograms later.",
+  "Collect the first known-frame observation with geometry and colors.",
   "splash.img holds 3 RGB888 frames of 1080x1920 behind a 'SPLASH!!' header; the ABL/MDP decodes one frame into cont_splash_mem@0x83401000 - the handoff framebuffer is RGB888 (3 B/px) while the panel runs 24bpp rgb_swap_rgb, so GopFramebuffer must declare the actual splash pixel format.",
   "xbl.elf reserves 'Display Reserved' 0x80400000-0x80C00000 (8 MB, WRITE_THROUGH) as the XBL early framebuffer, distinct from the ABL->OS continuous splash cont_splash_mem@0x83401000 (36 MB). The UniXNU GOP handoff framebuffer is cont_splash_mem@0x83401000 with geometry 1080x1920 and RGB888 stride (from splash.img decode); XBL's Display Reserved region is not used by UniXNU and may be reclaimed.",
 ]
 completion = ["A known frame appears with correct geometry and colors, then userland presentation and backlight controls work."]
-limits = ["Backlight controller (PMIC LPG vs WLED) still to confirm from the DTS pwm/wled node; panel status-command reg-read mode needs the DSI 2.0 read path.", "The MDP5/DSI ADT children (mdss, mdp, dsi0, dsi0-phy) are still status = \"disabled\". They use 1-cell addressing under mdss, which has no \"ranges\" property, so enabling them makes devicetree.py physical() raise 'ranges is required for address translation'. Fix that bus description before implementing the Mdp5 + DSI0 controller stage.", "Adreno530 is a read-only GPU register probe and explicitly publishes Adreno530OffsetsQualified = false; Msm8996Platform implements no display power sequencing."]
-next_action = ["Locate the backlight node (qcom,mdss-dsi-bl-pmic-control-type) in board.dts; fix the mdss ranges/address-cell description so its children can be exported to the ADT; implement Mdp5 + DSI 0 controller stage on hardware."]
+limits = ["Backlight controller (PMIC LPG vs WLED) still to confirm from the DTS pwm/wled node; panel status-command reg-read mode needs the DSI 2.0 read path."]
+next_action = ["Locate the backlight node (qcom,mdss-dsi-bl-pmic-control-type) in board.dts; implement Mdp5 + DSI 0 controller stage."]
 evidence = [
   "board.dts line 1510: qcom,mdss_dsi_ft8716_1080p_video with full timing/porch/init data.",
   "splash.img: 'SPLASH!!' header w=1080 h=1920 + 3x6220800 B RGB888 frames (total 18663936 B).",
@@ -204,7 +175,7 @@ evidence = [
 [[area]]
 id = "input"
 status = "in-progress"
-components = ["Blsp8996"]
+components = []
 paths = ["dts/msm8996.dtsi", "dts/g0245d.dts"]
 inputs = [
   "Touch identified: Synaptics DSX (compatible 'synaptics,dsx') at I2C 0x20 on i2c@75ba000 (BLSP2 I2C, SPI 106, 400 kHz), irq GPIO 125 (active-high), reset GPIO 89, regulators vdd/avdd; display coords 0..1599 x 0..2559, panel coords 0..1599 x 0..2703.",
@@ -213,13 +184,10 @@ inputs = [
 ]
 configuration = ["Button HID mapping mirrors sheng (home-button-type = 2)."]
 procedure = ["Implement BlspI2c; port a Synaptics DSX (S3xxx/S3700) touch driver; verify coordinate scaling."]
-findings = [
-  "Collect the first I2C scan and touch report observation.",
-  "The hardware buttons produced no reports on v97/v98, but the keypad path is not implicated: KeypadDeviceLib debounces and repeats through a 20 ms EFI_TIMER event, and the timer defect recorded in the cpu area silenced every EVT_TIMER consumer. Key state must be re-observed after v100 before any keypad code is changed.",
-]
+findings = ["Collect the first I2C scan and touch report observation."]
 completion = ["Touches map to the display, simultaneous contacts keep stable IDs, release events arrive, and buttons produce expected HID reports."]
-limits = ["Touch firmware (Synaptics PR = product ID / config image) not yet identified; display/panel coord mismatch (1600x2560 vs 1080x1920) needs the DSX config blob.", "Blsp8996 is linked into kernel.macho and its ADT node blsp2-i2c6 is enabled, but it is a READ-ONLY QUP wrapper probe: it reads QUP_CONFIG/STATE/OPERATION/ERROR_FLAGS/HW_VERSION, publishes BLSP8996Registers/Status/Failure/ProbeScope and performs no I2C transaction. QUP_HW_VERSION at 0x020 still needs confirmation against the MSM8996 BLSP IP."]
-next_action = ["Flash v103 and read BLSP8996Registers / BLSP8996Status / BLSP8996Failure first, then implement QUP v2 FIFO/block-mode transfers and the DSX touch driver. REA: locate the synaptics config/firmware blob (persist partition or touch firmware file) and extract the product ID."]
+limits = ["Touch firmware (Synaptics PR = product ID / config image) not yet identified; display/panel coord mismatch (1600x2560 vs 1080x1920) needs the DSX config blob."]
+next_action = ["REA: locate the synaptics config/firmware blob (persist partition or touch firmware file) and extract the product ID; then implement BlspI2c + DSX driver."]
 evidence = [
   "board.dts line 4608: synaptics@20 on i2c@75ba000 with gpio/regulator/coords.",
   "board.dts line 8326: goodix_touchfinger@0 (fingerprint, SPI).",
@@ -228,15 +196,15 @@ evidence = [
 [[area]]
 id = "gpu"
 status = "planned"
-components = ["Adreno530", "Msm8996Platform"]
+components = []
 paths = ["dts/msm8996.dtsi", "dts/g0245d.dts"]
 inputs = ["Adreno 530 (qcom,adreno-530.2) gpu@b00000, SPI 300, smmu-v2 0xb40000; GPU reserved memory to be read from the XBL memory map."]
 configuration = ["GPU disabled in stage 1-3; Metal acceleration is a later milestone."]
 procedure = ["Implement Adreno530 (A5xx KGSL register set, GMU-equivalent, ZAP firmware adoption) and an A5xx Metal translation path."]
 findings = ["Collect the first submission/fence observation."]
 completion = ["GPU submissions complete, mapping/fence handling is correct, a known image renders, and the selected Metal client presents it."]
-limits = ["Adreno740/AdrenoMetal are A7xx-only; the A5xx stack is new work with no catalog component.", "NativeAdreno530 is linked into kernel.macho and its ADT node gpu is enabled, but it is a READ-ONLY probe of three RBBM registers whose A5xx offsets are UNVERIFIED against the A530 TRM. It publishes Adreno530OffsetsQualified = false, Adreno530Registers, Status, Failure and ProbeScope, and performs no clock/power/VBIF/ringbuffer/GMU work (A5xx has no GMU).", "Msm8996Platform is an embedded kit that is not compiled or linked; all GPU power/clock/SMMU/display hooks return -1 and capabilities() returns 0. ArmSmmu4K already targets arm,mmu-500 (SMMUv2) — the gap is an owning IOService plus hardware init, not a 'v2 quirk branch'."]
-next_action = ["Flash v103 and read Adreno530Registers / Adreno530Status / Adreno530Failure first; confirm the A5xx RBBM offsets against the A530 TRM before any write. Inventory the KGSL/ZAP firmware blobs from the QFIL package with REA (gpu firmware in NON-HLOS.bin / vendor partition), then build the A5xx clock/power path and an owning SMMUv2 component on hardware."]
+limits = ["Adreno740/AdrenoMetal are A7xx-only; the A5xx stack is new work with no catalog component."]
+next_action = ["Inventory the KGSL/GMU firmware blobs from the QFIL package with REA (gpu firmware in NON-HLOS.bin / vendor partition)."]
 evidence = []
 
 [[area]]
@@ -314,15 +282,14 @@ findings = [
   "BootShim entry state: aboot decompresses the gzip stream to kernel_addr 0x80008000 (vmlinux entry 0xffffffc000080000 confirms PHYS_OFFSET 0x80000000) and jumps there with x0 pointing at the appended DTB at tags_addr 0x80000100. The decompressed image starts with the ARM64 header, so the shim must keep REQUIRES_KERNEL_HEADER=1 semantics with a valid head.S-style code0 branch.",
   "BootShim.S WRITTEN (uefi-g0245d/BootShim/BootShim.S) implements this exact contract: REQUIRES_KERNEL_HEADER=1 emits the ARM64 head (code0 `b` to real entry, +0x38 magic 0x644d5241, +0x08 = FD_BASE 0x92000000, +0x10 = len(shim)+FD_SIZE); runtime preserves x0=DTB, relocates the firmware volume from (load+shim_size) to FD_BASE 0x92000000 and branches to the UEFI SEC entry. clang --target=aarch64-none-elf compiled it to a 120-byte shim.o that passes every package-g0245d-boot.py assertion (ARM\\x64 magic, header fields, _Payload at end).",
 ]
-completion = ["BootShim stage 1 implemented and the boot image packs end-to-end: gzip(120-byte shim + 0x300000 FD) + single appended DTB, v0 header round-trip, gzip/FD/DTB round-trip, 16384 B container within the 64 MiB boot partition. Repeated flashes on hardware (v97, v98) boot into the UniXNU menu, so aboot accepts the container as the Ghidra contract predicted."]
+completion = ["BootShim stage 1 implemented and the boot image packs end-to-end: gzip(120-byte shim + 0x300000 FD) + single appended DTB, v0 header round-trip, gzip/FD/DTB round-trip, 16384 B container within the 64 MiB boot partition. The image is structurally accepted by aboot per the Ghidra-proven contract; flashing to hardware is the only remaining step."]
 limits = [
   "Stock bootloader unlock state confirmed by Ghidra: a locked retail G0245D boots an unsigned boot.img (boot_verifier errors are non-fatal); unlock (fastboot oem unlock, writes DAT_916902f4) skips verification entirely. QFIL/E DL remains the flashing/bypass path if the boot partition is write-protected.",
   "The stock cmdline requests cma=32M and lpm_levels.sleep_disabled=1; UniXNU supplies its own cmdline, so these are informational only.",
   "BootShim code at kernel_addr 0x80008000 must avoid the appended-DTB region 0x80000100-0x800536F7; it is placed above it, so the default layout is safe. FD_BASE=0x92000000 is confirmed clear of aboot's decompression target.",
-  "The FD is no longer a placeholder: SILICIUM_UEFI.fd is 3145728 bytes, byte-exact against [uefi_fd] size, and contains the real UniXNU/DarwinBoot payload. A build-time timestamp means two builds of identical sources produce different image md5s, so release checks compare the FD content (scripts/verify-fd-unixnu.py) and never the md5 alone.",
-  "AVB: `fastboot boot` on this aboot prints an `avb footer` warning and proceeds; it is not a failure signal.",
+  "SILICIUM_UEFI.fd in this build is a PLACEHOLDER (0x300000 bytes, marked G0245D-PLACEHOLDER-UEFI-FD-V0). A real firmware volume needs the Mu-Silicium EDK2 framework (not fetchable in this sandbox), nasm (missing on PATH) and the msm8996 NativeUfs8996/Adreno530/Mdp5/BlspI2c components (upstream not yet written); build it on a full Linux/macOS host then re-run package-g0245d-boot.py.",
 ]
-next_action = ["Flash v103 (workspace/tmp/g0245d-v103.img, md5 b7ff7cfa40217b43c21c5e7f16e71e55) and confirm the countdown advances. Every image from here on goes through scripts/flash-linux.sh, which pins the expected md5, refuses to overwrite a known older image and checks the ANDROID! magic before writing."]
+next_action = ["PACKAGING VALIDATED: flashable g0245d-uefi.img produced (build/g0245d/boot/g0245d-uefi.img), structurally accepted by aboot per the Ghidra-proven contract. REMAINING STEP = physical device: flash via QFIL/fastboot and observe first boot (serial @ BLSP2 UART2 0x75b0000). A real boot also requires the genuine SILICIUM_UEFI.fd (see limits)."]
 evidence = [
   "boot.img v0 header parsed; cmdline at offset 64 (name[16]+unused[2] precede it).",
   "boot.img kernel slot: zlib decompressobj(31) -> 26375904 B Image + unused_data starting d0 0d fe ed (FDT totalsize 341047), byte-identical to board.dtb.",
@@ -342,18 +309,12 @@ inputs = [
   "Serial console confirmed: BLSP2 UART2 @ 0x75b0000, SPI 114 (0x72), status ok in the stock DTS; cmdline console=ttyHSL0,115200,n8.",
   "USB Type-C debug cable; vmlinux (193 MB with symbols) available for offline analysis of the stock kernel.",
 ]
-configuration = ["kernel_args carries console=ttyHSL0,115200,n8 for the serial stage.", "No serial readback on the retail unit: the BLSP2 UART2 pads are not broken out, so the panel, storage and USB are the only channels."]
-procedure = ["Use the screen as the primary observation channel, CrashLogDxe for post-mortem data, and add the Advanced Logger exporter only once the menu is operable."]
-findings = [
-  "The Advanced Logger path is not available yet, and it would not help while the keys are dead. AdvLoggerPkg, MsGraphicsPkg/Library/QrEncoderLib and UniXNUPkg/Driver/AdvancedLogDxe all exist in the tree, but no Qualcomm platform in Mu-Silicium wires AdvancedLogger in, Msm8996Pkg has no AdvancedLoggerDxe or PcdUniXNUDeviceModel, and selecting Tools -> Advanced Logger is a menu action. The QR export removes the need to photograph text, not the need for working input; the menu keys were the same EVT_TIMER consumers that the timer bug silenced.",
-  "CrashLogDxe already implements the storage channel from the log-capture guide: on any synchronous abort or SError it snapshots the general registers, the exception syndrome and a frame-pointer backtrace, writes a CRSH-magic record to a 64 KiB region at the tail of userdata and cold-resets, so the record can be pulled from Android over adb without a serial port.",
-  "The screen is the live channel during stage 2. BootMark0..7 mark progress through the DXE dispatch, DisplayDiagDxe owns the panel, and KeyProbeDxe renders a per-key strip; the v99 menu diagnostic line reports driver count, CPU, HardwareInterrupt, TimerArch, interrupt state and the CntPct delta over a fixed busy loop, which separates a dead timer from a dead GIC.",
-]
+configuration = ["kernel_args carries console=ttyHSL0,115200,n8 for the serial stage."]
+procedure = ["Add the firmware log exporter; capture QR logs; then persistent capture after storage works."]
+findings = ["Collect the first serial log from the device."]
 completion = ["Each claimed milestone has a reproducible command, a matching source/image revision and an accessible result."]
-limits = ["Device availability not established; serial line wiring from the service manual.", "QR log export stays blocked until the platform gains an Advanced Logger and the menu accepts input; a candidate path is to make the exporter start without a menu action, which the current AdvancedLogDxe does not do."]
-next_action = ["Flash v103 and open Tools -> Advanced Logger. The logger is wired but nothing on the device has confirmed it yet: an empty Tools menu means AdvancedLogDxe never dispatched (its depex is gAdvancedLoggerProtocolGuid, installed only by DxeCore's AdvancedLoggerLib constructor), and a QR page that will not scan means the log buffer is empty or unmapped. Record the first real log capture in this area before removing KeyProbeDxe."]
+limits = ["Device availability not established; serial line wiring from the service manual."]
+next_action = ["Confirm the debug UART wiring and cable from the service manual; use the stock vmlinux + board.dts for offline driver reference."]
 evidence = [
   "board.dts serial@075b0000 (status ok) and serial@07570000 (disabled).",
-  "Common/Mu/AdvLoggerPkg and Common/Mu/MsGraphicsPkg/Library/QrEncoderLib present in the Mu-Silicium tree; UniXNUPkg/Driver/AdvancedLogDxe/AdvancedLogDxe.inf declares a gAdvancedLoggerProtocolGuid depex and produces the Tools menu plugin.",
-  "Drivers/CrashLogDxe/CrashLogDxe.c: CRASH_MAGIC 'CRSH', CRASH_REGION_BYTES 64 KiB at the userdata tail, MAX_BACKTRACE 32.",
 ]

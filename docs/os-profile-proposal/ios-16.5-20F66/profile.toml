@@ -1,0 +1,25 @@
+[os]
+name = "ios-16.5-20F66"
+arch = "arm64"
+target = "ios"
+ios_version = "16.5"
+darwin = "22.5.0"
+xnu_version = "8796.101.5"
+xnu_revision = "aca3beaa3dfbd42498b42c5e5ce20a938e6554e5"
+driverkit_tag = "xnu-8796.101.5"
+trustcache_tag = "xnu-8796.101.5"
+abi = []
+
+# The restore identity below selects the iPhone OS family donor. It does not
+# describe the G0245D board, SoC, device tree, or firmware.
+[ipsw]
+product = "iPhone10,3"
+version = "16.5"
+build = "20F66"
+# URL, device_class, chip_id, board_id, and component hashes must be populated
+# from the exact restore manifest before using this profile for image builds.
+
+[kernel]
+patch_series = []
+# No prelink values are copied from the NX769J donor. Derive kernelcache hash,
+# slide, roots, and any security initializer against the selected restore image.
