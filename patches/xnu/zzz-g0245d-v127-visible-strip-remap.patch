@@ -1,0 +1,172 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -362,23 +362,17 @@
+ 	extern void g0245d_paint_stage(int index);
+ 	g0245d_paint_stage(7);
+ 
+-	/* g0245d v124: stage 13 - C-side third strip works before slide/rebase */
+-	g0245d_paint_stage(13);
+ 
+ 	arm_setup_pre_sign();
+ 
+ 	arm_slide_rebase_and_sign_image();
+ 
+-	/* g0245d v124: stage 14 - survived slide+rebase+sign; paint still valid */
+-	g0245d_paint_stage(14);
+ 
+ 	/* If kernel integrity is supported, use a constant copy of the boot args. */
+ 	const_boot_args = *args;
+ 	BootArgs = args = &const_boot_args;
+ 
+ 	cpu_data_init(&BootCpuData);
+-	/* g0245d v124: stage 15 - BootCpuData initialised */
+-	g0245d_paint_stage(15);
+ #if defined(HAS_APPLE_PAC)
+ 	/* bootstrap cpu process dependent key for kernel has been loaded by start.s */
+ 	BootCpuData.rop_key = ml_default_rop_pid();
+@@ -386,8 +380,6 @@
+ #endif /* defined(HAS_APPLE_PAC) */
+ 
+ 	PE_init_platform(FALSE, args); /* Get platform expert set up */
+-	/* g0245d v124: stage 16 - platform expert up (first PE call) */
+-	g0245d_paint_stage(16);
+ 
+ #if __arm64__
+ #if 0  /* g0245d v125: Apple-SoC-private timer/WFE/misc register helpers.
+@@ -402,13 +394,9 @@
+ 
+ 	configure_misc_apple_boot_args();
+ #endif
+-	/* g0245d v124: stage 17 - about to touch Apple-private misc registers */
+-	g0245d_paint_stage(17);
+ #if 0  /* g0245d v125: Apple-private misc registers, UNDEFINED on Kryo */
+ 	configure_misc_apple_regs(true);
+ #endif
+-	/* g0245d v124: stage 18 - survived configure_misc_apple_regs(true) */
+-	g0245d_paint_stage(18);
+ 
+ #if (DEVELOPMENT || DEBUG)
+ 	unsigned long const *platform_stall_ptr = NULL;
+@@ -489,8 +477,6 @@
+ 	    - (uintptr_t)(args->virtBase)));
+ 
+ 	thread = thread_bootstrap();
+-	/* g0245d v124: stage 19 - bootstrap thread created */
+-	g0245d_paint_stage(19);
+ 	thread->machine.CpuDatap = &BootCpuData;
+ 	thread->machine.pcpu_data_base = (vm_offset_t)0;
+ 	machine_set_current_thread(thread);
+@@ -622,8 +608,6 @@
+ 
+ 	/* setup console output */
+ 	PE_init_printf(FALSE);
+-	/* g0245d v124: stage 20 - printf/console path up */
+-	g0245d_paint_stage(20);
+ 
+ #if __arm64__
+ #if DEBUG
+@@ -699,7 +683,11 @@
+ 	 * against string vulnerabilities
+ 	 */
+ 	__stack_chk_guard &= ~(0xFFULL << 8);
+-	/* g0245d v124: stage 21 - leaving arm_init, about to enter machine_startup */
++	/* g0245d v127: SELF-CHECK. v125 proved arm_init() completes, so the
++	 * eight inner marks (13..20) were removed and their rows 700..924 are
++	 * reused by machine_startup()/kernel_bootstrap() in this build. This
++	 * one stays at row 956 (topmost third-strip band): if it is lit, we
++	 * really reached the line just before machine_startup(args). */
+ 	g0245d_paint_stage(21);
+ 	machine_startup(args);
+ }
+diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -501,8 +501,8 @@
+ {
+ 	extern void g0245d_paint_stage(int index);
+ 
+-	/* g0245d v126: stage 22 - entered machine_startup() from arm_init() */
+-	g0245d_paint_stage(22);
++	/* g0245d v127: stage 22 (paint index 13, visible row) - entered machine_startup() from arm_init() */
++	g0245d_paint_stage(13);
+ 
+ #if defined(HAS_IPI) && (DEVELOPMENT || DEBUG)
+ 	if (!PE_parse_boot_argn("fastipi", &gFastIPI, sizeof(gFastIPI))) {
+@@ -513,8 +513,8 @@
+ 
+ 	machine_conf();
+ 
+-	/* g0245d v126: stage 23 - machine_conf() done, about to call kernel_bootstrap() */
+-	g0245d_paint_stage(23);
++	/* g0245d v127: stage 23 (paint index 14, visible row) - machine_conf() done, about to call kernel_bootstrap() */
++	g0245d_paint_stage(14);
+ 
+ 	/*
+ 	 * Kick off the kernel bootstrap.
+diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -424,8 +424,8 @@
+ {
+ 	extern void g0245d_paint_stage(int index);
+ 
+-	/* g0245d v126: stage 24 - entered kernel_bootstrap() */
+-	g0245d_paint_stage(24);
++	/* g0245d v127: stage 24 (paint index 15, visible row) - entered kernel_bootstrap() */
++	g0245d_paint_stage(15);
+ 
+ 	kern_return_t   result;
+ 	thread_t        thread;
+@@ -437,14 +437,14 @@
+ 
+ 	scale_setup();
+ 
+-	/* g0245d v126: stage 25 - scale_setup() done, before vm_mem_bootstrap() */
+-	g0245d_paint_stage(25);
++	/* g0245d v127: stage 25 (paint index 16, visible row) - scale_setup() done, before vm_mem_bootstrap() */
++	g0245d_paint_stage(16);
+ 
+ 	kernel_bootstrap_log("vm_mem_bootstrap");
+ 	vm_mem_bootstrap();
+ 
+-	/* g0245d v126: stage 26 - vm_mem_bootstrap() done (page tables may have switched) */
+-	g0245d_paint_stage(26);
++	/* g0245d v127: stage 26 (paint index 17, visible row) - vm_mem_bootstrap() done (page tables may have switched) */
++	g0245d_paint_stage(17);
+ 
+ 	machine_info.memory_size = (uint32_t)mem_size;
+ #if XNU_TARGET_OS_OSX
+@@ -490,8 +490,8 @@
+ 	kernel_bootstrap_log("console_init");
+ 	console_init();
+ 
+-	/* g0245d v126: stage 27 - console_init() done */
+-	g0245d_paint_stage(27);
++	/* g0245d v127: stage 27 (paint index 18, visible row) - console_init() done */
++	g0245d_paint_stage(18);
+ 
+ 	kernel_bootstrap_log("stackshot_init");
+ 	stackshot_init();
+@@ -513,8 +513,8 @@
+ 	kernel_bootstrap_log("PMAP_ACTIVATE_KERNEL");
+ 	PMAP_ACTIVATE_KERNEL(master_cpu);
+ 
+-	/* g0245d v126: stage 28 - PMAP_ACTIVATE_KERNEL() done */
+-	g0245d_paint_stage(28);
++	/* g0245d v127: stage 28 (paint index 19, visible row) - PMAP_ACTIVATE_KERNEL() done */
++	g0245d_paint_stage(19);
+ 
+ 	kernel_bootstrap_log("mapping_free_prime");
+ 	mapping_free_prime();                                           /* Load up with temporary mapping blocks */
+@@ -528,8 +528,8 @@
+ 	kernel_bootstrap_log("clock_init");
+ 	clock_init();
+ 
+-	/* g0245d v126: stage 29 - clock_init() done */
+-	g0245d_paint_stage(29);
++	/* g0245d v127: stage 29 (paint index 20, visible row) - clock_init() done */
++	g0245d_paint_stage(20);
+ 
+ 	/*
+ 	 *	Initialize the IPC, task, and thread subsystems.

@@ -1,0 +1,95 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -620,42 +620,37 @@
+ 	g0245d_paint_stage(21);   /* v136: at the arm_vm_init() call site */
+ 
+ 	/*
+-	 * G0245D v160: three-way mapping probe.
++	 * G0245D v161: is the loader V=P window still writable after arm_vm_init?
+ 	 *
+-	 * The loader V=P window (0xC3401000, phys 0x83401000 + 0x40000000) is the
+-	 * ONLY mapping ever proven to reach this panel - g0245d_paint_stage uses
+-	 * exactly it, and bands light from it. arm_vm_init() rewrites TTBR0, so
+-	 * everything hinges on one question: does that window still work after
+-	 * the swap? Nothing we tried afterwards (physmap, ml_io_map, pmap_map_bd)
+-	 * ever lit a pixel, but each of those attempts also painted huge ranges
+-	 * (up to 6.2 MB) that may simply have run off the end of the mapping.
++	 * v160 tried to answer this with probes at rows 1000-1100. But every band
++	 * this project has ever painted lives at rows 8-972, so those probes sat
++	 * 190 KB past the highest row ever proven writable - they most likely
++	 * aborted before arm_vm_init even ran, and the photo showed the loader's
++	 * last frame with no trace of them. v161 stays strictly inside proven
++	 * territory: bands 0..7 own rows 200..680 and they light from this very
++	 * window (0xC3401000, see the immediates in osfmk/arm64/start.s).
+ 	 *
+-	 * So: three 16-row (51 KB) probes, each through a different mapping, at
+-	 * rows clear of every existing band (bands live in rows 200-648 and
+-	 * 700-956; the panel is vertically flipped, so rows 1000-1100 land in the
+-	 * middle of the visible screen):
+-	 *
+-	 *   A  row 1000  identity VA   BEFORE arm_vm_init  - control
+-	 *   B  row 1040  identity VA   AFTER  arm_vm_init  - does TTBR0 keep it?
+-	 *   C  row 1080  physmap VA    AFTER  arm_vm_init  - is physmap usable?
++	 * Two floods of rows 200..680, straddling the TTBR0 swap:
++	 *   1. BEFORE arm_vm_init: white  (the eight separate bars merge into one
++	 *      solid block - proves the flood itself lands)
++	 *   2. AFTER  arm_vm_init: black  (the block disappears if writes still
++	 *      reach the panel)
+ 	 *
+ 	 * Photo readings:
+-	 *   1 bar (A only)      -> the identity window dies in arm_vm_init, and
+-	 *                          the abort stops us before B; we must build a
+-	 *                          fresh mapping after the swap.
+-	 *   2 bars (A + B)      -> the identity window SURVIVES the swap; physmap
+-	 *                          is the broken path. Use 0xC3401000 everywhere.
+-	 *   3 bars (A + B + C)  -> both work; earlier failures were the huge
+-	 *                          writes, not the mapping.
+-	 *   0 bars              -> my C-level writes differ from the asm in
+-	 *                          start.s; fix the probe itself.
++	 *   solid WHITE block up top   -> step 1 worked, step 2 died: the identity
++	 *                                 window does NOT survive arm_vm_init.
++	 *   the bars are GONE / black  -> step 2 worked: the window SURVIVES, and
++	 *                                 we can drive the panel through
++	 *                                 0xC3401000 all the way to machine_startup.
++	 *   eight bars exactly as before -> neither flood landed, so C-level
++	 *                                 stores differ from the asm in start.s.
+ 	 */
+ 	{
+ 		volatile unsigned int *fb;
+ 		unsigned long n;
+ 
+-		fb = (volatile unsigned int *)(unsigned long)(0xC3401000UL + 1000UL * 0xCA8UL);
+-		for (n = 0; n < (16UL * 0xCA8UL / 4UL); n++) {
++		fb = (volatile unsigned int *)(unsigned long)(0xC3401000UL + 200UL * 0xCA8UL);
++		for (n = 0; n < (480UL * 0xCA8UL / 4UL); n++) {
+ 			fb[n] = 0xFFFFFFFFU;
+ 		}
+ 	}
+@@ -663,23 +658,12 @@
+ 	arm_vm_init(xmaxmem, args);
+ 
+ 	{
+-		extern unsigned long gVirtBase;
+-		extern unsigned long gPhysBase;
+ 		volatile unsigned int *fb;
+-		volatile unsigned int *pm;
+ 		unsigned long n;
+ 
+-		/* B: the same loader window, now after the TTBR0 swap. */
+-		fb = (volatile unsigned int *)(unsigned long)(0xC3401000UL + 1040UL * 0xCA8UL);
+-		for (n = 0; n < (16UL * 0xCA8UL / 4UL); n++) {
+-			fb[n] = 0xFFFFFFFFU;
+-		}
+-
+-		/* C: the kernel physmap window. */
+-		pm = (volatile unsigned int *)(unsigned long)
+-		    (gVirtBase + (0x83401000UL - gPhysBase) + 1080UL * 0xCA8UL);
+-		for (n = 0; n < (16UL * 0xCA8UL / 4UL); n++) {
+-			pm[n] = 0xFFFFFFFFU;
++		fb = (volatile unsigned int *)(unsigned long)(0xC3401000UL + 200UL * 0xCA8UL);
++		for (n = 0; n < (480UL * 0xCA8UL / 4UL); n++) {
++			fb[n] = 0x00000000U;
+ 		}
+ 
+ 		for (;;) {

@@ -1,0 +1,121 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+index 5d21004..e5b7d08 100644
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -216,6 +216,30 @@ g0245d_paint_stage_vm(int index)
+ }
+ 
+ 
++static void
++g0245d_mark_va(int index)
++{
++	extern void g0245d_paint_stage(int index);
++
++	g0245d_paint_stage(index);
++}
++
++/* After arm_vm_init(): reach the framebuffer through the kernel physmap.
++ * Repaints the whole ladder 13..index: band 21 was painted pre-vm_init on
++ * the bootstrap VA and the vc console clear erases it, and later console
++ * text can punch holes into any band. Repainting keeps the ladder complete
++ * so the read-out stays a continuous chain. */
++static void
++g0245d_mark_vm(int index)
++{
++	int i;
++
++	for (i = 13; i <= index; i++) {
++		g0245d_paint_stage_vm(i);
++	}
++}
++
++
+ #if __arm64__
+ unsigned int page_shift_user32; /* for page_size as seen by a 32-bit task */
+ 
+@@ -609,9 +633,10 @@ arm_init(
+ 	__builtin_arm_wsr("pan", 1);
+ #endif  /* __ARM_PAN_AVAILABLE__ */
+ 
+-	g0245d_paint_stage(21);   /* v136: at the arm_vm_init() call site */
++	g0245d_mark_va(21);   /* v140: band 21 - at the arm_vm_init() call site */
+ 
+ 	arm_vm_init(xmaxmem, args);
++	g0245d_mark_vm(22);   /* v140: band 22 - arm_vm_init() returned */
+ 
+ 	if (debug_boot_arg) {
+ 		patch_low_glo();
+@@ -625,6 +650,7 @@ arm_init(
+ 
+ 	/* Setup debugging output. */
+ 	const unsigned int serial_exists = serial_init();
++	g0245d_mark_vm(23);   /* v140: band 23 - serial_init() returned */
+ 
+ 	kernel_startup_initialize_upto(STARTUP_SUB_KPRINTF);
+ 	kprintf("kprintf initialized\n");
+@@ -668,9 +694,11 @@ arm_init(
+ 		disableConsoleOutput = FALSE;     /* Allow printfs to happen */
+ 	}
+ 	PE_create_console();
++	g0245d_mark_vm(24);   /* v140: band 24 - console created (v139 proved this band visible) */
+ 
+ 	/* setup console output */
+ 	PE_init_printf(FALSE);
++	g0245d_mark_vm(26);   /* v140: band 26 - PE_init_printf returned */
+ 
+ #if __arm64__
+ #if DEBUG
+@@ -679,8 +707,10 @@ arm_init(
+ #endif
+ 
+ 	cpu_machine_idle_init(TRUE);
++	g0245d_mark_vm(27);   /* v140: band 27 - cpu_machine_idle_init returned */
+ 
+ 	PE_init_platform(TRUE, &BootCpuData);
++	g0245d_mark_vm(28);   /* v140: band 28 - PE_init_platform returned */
+ 
+ #if __arm64__
+ 	extern bool cpu_config_correct;
+@@ -689,6 +719,7 @@ arm_init(
+ 	}
+ 
+ 	ml_map_cpu_pio();
++	g0245d_mark_vm(29);   /* v140: band 29 - ml_map_cpu_pio returned */
+ 
+ #if APPLE_ARM64_ARCH_FAMILY
+ 	configure_late_apple_regs(true);
+@@ -697,14 +728,18 @@ arm_init(
+ #endif
+ 
+ 	cpu_timebase_init(TRUE);
++	g0245d_mark_vm(30);   /* v140: band 30 - cpu_timebase_init returned */
+ 
+ #if KPERF
+ 	/* kptimer_curcpu_up() must be called after cpu_timebase_init */
+ 	kptimer_curcpu_up();
++	g0245d_mark_vm(31);   /* v140: band 31 - kptimer_curcpu_up returned */
+ #endif /* KPERF */
+ 
+ 	PE_init_cpu();
++	g0245d_mark_vm(32);   /* v140: band 32 - PE_init_cpu returned */
+ 	fiq_context_init(TRUE);
++	g0245d_mark_vm(33);   /* v140: band 33 - fiq_context_init returned */
+ 
+ 
+ #if HIBERNATION
+@@ -733,6 +768,7 @@ arm_init(
+ 
+ 	gDramBase = *dram_base;
+ 	gDramSize = *dram_size;
++	g0245d_mark_vm(34);   /* v140: band 34 - DT dram-base/size read */
+ 
+ 	/*
+ 	 * Initialize the stack protector for all future calls
+@@ -746,6 +782,7 @@ arm_init(
+ 	 * against string vulnerabilities
+ 	 */
+ 	__stack_chk_guard &= ~(0xFFULL << 8);
++	g0245d_mark_vm(25);   /* v140: band 25 - entering machine_startup() */
+ 	machine_startup(args);
+ }
+ 

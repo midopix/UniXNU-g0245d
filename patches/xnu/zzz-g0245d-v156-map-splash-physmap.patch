@@ -1,0 +1,57 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -613,6 +613,28 @@
+ 
+ 	arm_vm_init(xmaxmem, args);
+ 
++	/* G0245D v156: the splash framebuffer @0x83401000 is a reserved region and
++	 * is NOT in the bootstrap physmap, so writing gVirtBase+pa-gPhysBase faults
++	 * (that is why every physmap paint + the console stayed black). Now that
++	 * arm_vm_init/pmap_bootstrap has run, map the splash pages into the physmap
++	 * VA with pmap_map_bd(), then fill the panel white and halt - a point we are
++	 * certain is reached, so white proves the mapping now works. */
++	{
++		extern vm_map_address_t pmap_map_bd(vm_map_address_t virt, vm_offset_t start,
++		    vm_offset_t end, vm_prot_t prot);
++		extern vm_offset_t gVirtBase;
++		extern vm_offset_t gPhysBase;
++		extern void g0245d_fb_block(int r0, int r1);
++		extern void g0245d_halt(void);
++		const vm_offset_t fb_pa = 0x83401000;
++		const vm_offset_t fb_sz = 0x23ff000;
++		vm_offset_t fb_va = gVirtBase + (fb_pa - gPhysBase);
++
++		pmap_map_bd(fb_va, fb_pa, fb_pa + fb_sz, VM_PROT_READ | VM_PROT_WRITE);
++		g0245d_fb_block(0, 1920);
++		g0245d_halt();
++	}
++
+ 	if (debug_boot_arg) {
+ 		patch_low_glo();
+ 	}
+diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -3408,18 +3408,11 @@
+ {
+ 	const uint64_t fb_pa    = 0x83401000ULL;
+ 	const uint64_t rowbytes = 0xCA8ULL;   /* 1080 px * 3 bytes (24bpp) */
+-	uint64_t       va;
++	uint64_t       va       = (uint64_t)gVirtBase + (fb_pa - (uint64_t)gPhysBase);
+ 	int            y;
+ 
+-	/* v155: cont_splash_mem is declared no-map (dts/g0245d.dts), so it is NOT
+-	 * in the kernel physmap - writing gVirtBase+pa-gPhysBase faults. Explicitly
+-	 * I/O-map it (same ml_io_map_unmappable the console uses) and paint that. */
+-	va = (uint64_t)ml_io_map_unmappable((vm_map_offset_t)fb_pa,
+-	    (vm_size_t)0x23ff000ULL, VM_WIMG_IO);
+-	if (va == 0) {
+-		return;
+-	}
+-
++	/* v156: the splash region is mapped into the physmap by arm_init's
++	 * pmap_map_bd(), so the physmap VA is now valid here. */
+ 	for (y = r0; y < r1; y++) {
+ 		unsigned char *p = (unsigned char *)(uintptr_t)(va + (uint64_t)y * rowbytes);
+ 		uint64_t       k;

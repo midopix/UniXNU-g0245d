@@ -1,0 +1,80 @@
+Subject: [PATCH] g0245d v184: fb liveness probe via physmap + dc civac
+
+diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -3477,6 +3477,62 @@
+ 	__asm__ __volatile__("msr daifset, #0xf\n1:\tb 1b" ::: "memory");
+ }
+ 
++
++/*
++ * G0245D v184: framebuffer liveness probe through the physmap, with an
++ * explicit cache clean to PoC.
++ *
++ * Why not ml_io_map(): osfmk/arm/io_map.c:105 falls into
++ *     start = virtual_space_start; virtual_space_start += round_page(size);
++ *     pmap_map_bd(start, phys_addr, ...);
++ * when startup_phase < STARTUP_SUB_KMEM, and into a kmem_alloc(io_submap)
++ * otherwise. io_submap only exists after STARTUP(KMEM, STARTUP_RANK_LAST,
++ * io_map_init). arm_init() sits between those two points, so ml_io_map()
++ * cannot succeed here no matter what (v180-v183 all died on this).
++ *
++ * The physmap, by contrast, is fully built by arm_vm_init(), so
++ * gVirtBase + (pa - gPhysBase) is always valid here. It is Normal cacheable
++ * though: the stores land in cache and the scanout engine, reading DRAM by
++ * DMA, keeps showing stale pixels. That is exactly why v152's block never
++ * appeared. v184 cleans each touched line to the point of coherency, so the
++ * writes become visible under either memory attribute.
++ *
++ * Screen rows are flipped because SimpleFbDxe runs with mFbFlip = TRUE
++ * (the panel scans the buffer bottom-up).
++ */
++void
++g0245d_fb_probe(void)
++{
++	const uint64_t fb_pa    = 0x83401000ULL;
++	const uint64_t rowbytes = 0xCA8ULL;      /* 3240 == 1080 px * 3 bytes */
++	const uint64_t height   = 1920ULL;
++	uint64_t       va       = (uint64_t)gVirtBase +
++	    (fb_pa - (uint64_t)gPhysBase);
++	uint64_t       lo, hi, a;
++	int            y;
++
++	/* Solid black band on screen rows 1250..1450 -- the lower panel, which
++	 * the loader leaves light grey, so black is unmistakable. */
++	for (y = 1250; y < 1450; y++) {
++		unsigned char *p = (unsigned char *)(uintptr_t)
++		    (va + (height - 1ULL - (uint64_t)y) * rowbytes);
++		uint64_t       k;
++
++		for (k = 0; k < rowbytes; k++) {
++			p[k] = 0x00;
++		}
++	}
++
++	/* Clean + invalidate every cache line the band touched. */
++	lo = va + (height - 1ULL - 1449ULL) * rowbytes;
++	hi = va + (height - 1ULL - 1250ULL) * rowbytes;
++	lo &= ~63ULL;
++	for (a = lo; a < hi; a += 64ULL) {
++		__asm__ __volatile__("dc civac, %0" :: "r"(a) : "memory");
++	}
++	__asm__ __volatile__("dsb sy" ::: "memory");
++}
++
+ /*
+  * G0245D v168: bring the MMSS display power domains and clocks back up.
+  *
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -846,6 +846,8 @@
+ 	}
+ 	/* G0245D v175 mark 1: after arm_vm_init, before console create */
+ 	{ extern void g0245d_fb_mark(int n); g0245d_fb_mark(1); }
++	/* G0245D v184: physmap + cache clean probe (earliest after arm_vm_init). */
++	{ extern void g0245d_fb_probe(void); g0245d_fb_probe(); }
+ 	PE_create_console();
+ 	/* G0245D v143: serial=3 + an enumerated UART switched the console to a
+ 	 * dead ttyHSL0 above, so the fb was cleared (black) and got no output.

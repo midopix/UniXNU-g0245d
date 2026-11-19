@@ -1,0 +1,27 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -390,14 +390,23 @@
+ 	g0245d_paint_stage(16);
+ 
+ #if __arm64__
++#if 0  /* g0245d v125: Apple-SoC-private timer/WFE/misc register helpers.
++	 * v124 died between stage 16 and stage 17, i.e. inside this block.
++	 * The same class of registers (APPLY_TUNABLES / CPU_OVRD in start.s)
++	 * already had to be disabled on MSM8996/Kryo, where they are UNDEFINED.
++	 * Keep the stage 17/18 marks outside the block so the readout stays
++	 * unchanged; stages 19/20/21 show whether we get past machine_startup. */
+ 	configure_timer_apple_regs();
+ 	wfe_timeout_configure();
+ 	wfe_timeout_init();
+ 
+ 	configure_misc_apple_boot_args();
++#endif
+ 	/* g0245d v124: stage 17 - about to touch Apple-private misc registers */
+ 	g0245d_paint_stage(17);
++#if 0  /* g0245d v125: Apple-private misc registers, UNDEFINED on Kryo */
+ 	configure_misc_apple_regs(true);
++#endif
+ 	/* g0245d v124: stage 18 - survived configure_misc_apple_regs(true) */
+ 	g0245d_paint_stage(18);
+ 

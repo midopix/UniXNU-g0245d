@@ -1,0 +1,152 @@
+--- a/pexpert/arm/pe_serial.c
++++ b/pexpert/arm/pe_serial.c
+@@ -811,10 +811,52 @@
+  * 384 at row 17 - inside the proven-visible fb rows 8..972. */
+ #define G0245D_FBCON_ROW0   960          /* screen row, before the flip */
+ 
+-static volatile uint8_t *g0245d_fbcon_base;
++/* G0245D v191: paint through the loader identity window, NOT through
++ * ml_io_map(). The v176 fb_mark history comment records what photos proved:
++ * "ml_io_map, pmap_map_bd and its _with_options variant all failed too -
++ * the latter forwards to sptm_map_page(), whose result is only checked by
++ * __assert_only, i.e. silent failure on a board without SPTM", and the
++ * kernel physmap is Normal cacheable so its stores never reach DRAM (MDP5's
++ * DMA reads memory directly). pmap_map() silently leaves the PTE unwritten,
++ * so the first fbcon_init() store takes a data abort - exactly the frozen
++ * pre-fault frame in the v189/v190 photos. The ONE painter with photo proof
++ * on this board is the TTBR0 borrow: swap in the loader's page table, write
++ * through 0xC3401000 (loader identity VA -> PA 0x83401000), swap back. That
++ * is how every fb_mark band ever photographed got there. */
++#define G0245D_FBCON_VA     0xC3401000UL
++extern uint64_t g0245d_ttbr0_loader;    /* video_console.c, saved in arm_init */
++
+ static uint32_t g0245d_fbcon_col = 0;
+ static uint32_t g0245d_fbcon_row = 0;
+ 
++static uint64_t g0245d_fbcon_ttbr0_saved;
++
++/* Swap the loader page table back into TTBR0 so the identity window is live.
++ * Kernel code runs on TTBR1 and is untouched; the full TLBI matches what
++ * g0245d_fb_mark() has proven safe in photos since v176. */
++static void
++g0245d_fbcon_ttbr0_push(void)
++{
++	__asm__ __volatile__("mrs %0, ttbr0_el1" : "=r"(g0245d_fbcon_ttbr0_saved));
++	__asm__ __volatile__("msr ttbr0_el1, %0" :: "r"(g0245d_ttbr0_loader) : "memory");
++	__asm__ __volatile__("dsb sy" ::: "memory");
++	__asm__ __volatile__("isb" ::: "memory");
++	__asm__ __volatile__("tlbi vmalle1" ::: "memory");
++	__asm__ __volatile__("dsb sy" ::: "memory");
++	__asm__ __volatile__("isb" ::: "memory");
++}
++
++static void
++g0245d_fbcon_ttbr0_pop(void)
++{
++	__asm__ __volatile__("msr ttbr0_el1, %0" :: "r"(g0245d_fbcon_ttbr0_saved) : "memory");
++	__asm__ __volatile__("dsb sy" ::: "memory");
++	__asm__ __volatile__("isb" ::: "memory");
++	__asm__ __volatile__("tlbi vmalle1" ::: "memory");
++	__asm__ __volatile__("dsb sy" ::: "memory");
++	__asm__ __volatile__("isb" ::: "memory");
++}
++
+ static void
+ g0245d_fbcon_px(uint32_t x, uint32_t y_screen, uint8_t g, uint8_t r, uint8_t b)
+ {
+@@ -825,7 +867,7 @@
+ 	if ((x >= (uint32_t)G0245D_FB_WIDTH) || (y_fb >= (uint32_t)G0245D_FB_HEIGHT)) {
+ 		return;
+ 	}
+-	p = g0245d_fbcon_base +
++	p = (volatile uint8_t *)G0245D_FBCON_VA +
+ 	    (unsigned long)y_fb * G0245D_FB_STRIDE +
+ 	    (unsigned long)x * G0245D_FB_BPP;
+ 	p[0] = g;
+@@ -857,7 +899,7 @@
+ }
+ 
+ static void
+-g0245d_fbcon_init(void)
++g0245d_fbcon_init_inner(void)
+ {
+ 	uint32_t r;
+ 
+@@ -868,6 +910,16 @@
+ 	}
+ }
+ 
++/* v191: every FB-touching entry point borrows the loader page table for its
++ * duration; one swap per character (not per pixel) keeps the TLBI count sane. */
++static void
++g0245d_fbcon_init(void)
++{
++	g0245d_fbcon_ttbr0_push();
++	g0245d_fbcon_init_inner();
++	g0245d_fbcon_ttbr0_pop();
++}
++
+ static unsigned int
+ g0245d_fbcon_ready(void)
+ {
+@@ -875,14 +927,11 @@
+ }
+ 
+ static void
+-g0245d_fbcon_putc(uint8_t c)
++g0245d_fbcon_putc_inner(uint8_t c)
+ {
+ 	const unsigned char *glyph;
+ 	uint32_t x0, y0, gy, gx, sy, sx;
+ 
+-	if (g0245d_fbcon_base == NULL) {
+-		return;
+-	}
+ 	if (c == '\r') {
+ 		g0245d_fbcon_col = 0;
+ 		return;
+@@ -920,6 +969,16 @@
+ 	g0245d_fbcon_col++;
+ }
+ 
++/* v191: one TTBR0 borrow per character. All newline/blank work triggered
++ * inside runs under the same borrow. */
++static void
++g0245d_fbcon_putc(uint8_t c)
++{
++	g0245d_fbcon_ttbr0_push();
++	g0245d_fbcon_putc_inner(c);
++	g0245d_fbcon_ttbr0_pop();
++}
++
+ static void
+ g0245d_fbcon_puts(const char *s)
+ {
+@@ -958,9 +1017,12 @@
+ void
+ g0245d_fbcon_start(void)
+ {
+-	g0245d_fbcon_base = (volatile uint8_t *)(uintptr_t)
+-	    ml_io_map((vm_offset_t)G0245D_FB_PA, (vm_size_t)G0245D_FB_SIZE);
+-	if (g0245d_fbcon_base == NULL) {
++	/* v191: no ml_io_map here - on this board pmap_map silently leaves the
++	 * PTE unwritten (no SPTM), so the map would exist but every store to it
++	 * would take a data abort (v189/v190 photos). The loader identity window
++	 * at 0xC3401000 is the only fb path with photo proof; it needs the
++	 * loader TTBR0, which arm_init saved before switching to the kernel's. */
++	if (g0245d_ttbr0_loader == 0) {
+ 		return;
+ 	}
+ 
+@@ -968,9 +1030,9 @@
+ 	register_serial_functions(&g0245d_fbcon_serial_functions);
+ 
+ 	/* Proof of life, drawn without kprintf and without vinfo.v_baseaddr. */
+-	g0245d_fbcon_puts("V183 FBCON OK");
++	g0245d_fbcon_puts("V191 FBCON OK");
+ 	g0245d_fbcon_puts("\n");
+-	g0245d_fbcon_puts("ml_io_map device 24bpp flipped");
++	g0245d_fbcon_puts("loader ttbr0 identity 24bpp");
+ }
+ 
+ #if HIBERNATION

@@ -1,0 +1,16 @@
+diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -722,10 +722,10 @@
+ 	 * This will start displaying progress to the user, start as early as possible
+ 	 */
+ 	g0245d_fb_mark(2);
++	g0245d_fb_block(600, 1400);	/* v153: prove we reach the kPEAcquireScreen call */
++	g0245d_halt();			/* v153: freeze BEFORE the clear */
+ 	initialize_screen(NULL, kPEAcquireScreen);
+ 	g0245d_fb_mark(3);	/* v151: drawn AFTER the kPEAcquireScreen clear */
+-	g0245d_fb_block(600, 1400);	/* v152: big white block if we survived the clear */
+-	g0245d_halt();			/* v152: freeze here so a photo can see it */
+ 
+ 	/*
+ 	 * G0245D v148: the kPEAcquireScreen call above brings up the graphics

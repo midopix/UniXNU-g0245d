@@ -1,0 +1,25 @@
+diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
+index f3532cc..0318f49 100644
+--- a/pexpert/arm/pe_init.c
++++ b/pexpert/arm/pe_init.c
+@@ -430,6 +430,20 @@ PE_init_platform(boolean_t vm_initialized, void *args)
+ 		PE_state.video.v_width = boot_args_ptr->Video.v_width;
+ 		PE_state.video.v_height = boot_args_ptr->Video.v_height;
+ 		PE_state.video.v_depth = (boot_args_ptr->Video.v_depth >> kBootVideoDepthDepthShift) & kBootVideoDepthMask;
++		/*
++		 * G0245D: the boot shim can report a v_width that disagrees with
++		 * the real line stride (v_rowBytes). The video console renders
++		 * (v_depth >> 3) bytes per pixel with a row stride of v_rowBytes,
++		 * so an oversized v_width makes every row overrun the framebuffer
++		 * and smear the text. Recompute the column count from the stride.
++		 */
++		if (PE_state.video.v_rowBytes && PE_state.video.v_depth >= 8) {
++			unsigned int g0245d_w = PE_state.video.v_rowBytes /
++			    (unsigned int)(PE_state.video.v_depth >> 3);
++			if (g0245d_w > 0) {
++				PE_state.video.v_width = g0245d_w;
++			}
++		}
+ 		PE_state.video.v_rotate = (
+ 			((boot_args_ptr->Video.v_depth >> kBootVideoDepthRotateShift) & kBootVideoDepthMask) +    // rotation
+ 			((boot_args_ptr->Video.v_depth >> kBootVideoDepthBootRotateShift)  & kBootVideoDepthMask) // add extra boot rotation

@@ -1,0 +1,30 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -611,13 +611,10 @@
+ 
+ 	g0245d_paint_stage(21);   /* v136: at the arm_vm_init() call site */
+ 
+-	arm_vm_init(xmaxmem, args);
+-
+-	/* G0245D v157: PSCI SYSTEM_RESET probe (no display, no serial needed).
+-	 * If the device REBOOTS (loader reappears / keeps looping), the kernel
+-	 * completed arm_vm_init and executed this. A static black/frozen screen
+-	 * means we never got here (or the reset conduit is dead). This is the
+-	 * ground-truth signal we could not get from the framebuffer. */
++	/* G0245D v158: calibrate the reset conduit at a point we KNOW is reached
++	 * (the arm_vm_init call site, where band 21 lights). REBOOT => the PSCI
++	 * reset works and we can bisect kernel progress; frozen => the PSCI reset
++	 * conduit is dead on this board and we need another reachability signal. */
+ 	__asm__ __volatile__(
+ 		"movz w0, #0x0009\n\t"
+ 		"movk w0, #0x8400, lsl #16\n\t"
+@@ -628,6 +625,8 @@
+ 		"1:\twfe\n\tb 1b\n"
+ 		::: "x0", "x1", "x2", "x3", "memory");
+ 
++	arm_vm_init(xmaxmem, args);
++
+ 	if (debug_boot_arg) {
+ 		patch_low_glo();
+ 	}

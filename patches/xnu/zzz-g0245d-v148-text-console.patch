@@ -1,0 +1,39 @@
+diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
+index dfa5da2..52542b3 100644
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -221,8 +221,9 @@ TUNABLE(startup_debug_t, startup_debug, "startup_debug", 0);
+ static inline void
+ kernel_bootstrap_log(const char *message)
+ {
+-	if ((startup_debug & STARTUP_DEBUG_VERBOSE) &&
+-	    startup_phase >= STARTUP_SUB_KPRINTF) {
++	/* G0245D v148: always print the bootstrap trace (startup_debug is a
++	 * SECURITY_READ_ONLY_LATE tunable we cannot poke at this point). */
++	if (startup_phase >= STARTUP_SUB_KPRINTF) {
+ 		kprintf("kernel_bootstrap: %s\n", message);
+ 	}
+ 	kernel_debug_string_early(message);
+@@ -715,6 +716,22 @@ kernel_bootstrap_thread(void)
+ 	 */
+ 	initialize_screen(NULL, kPEAcquireScreen);
+ 
++	/*
++	 * G0245D v148: the kPEAcquireScreen call above brings up the graphics
++	 * *progress* screen.  Because the console is not serial, gc_enable(FALSE)
++	 * inside it sets disableConsoleOutput = TRUE, and vc_progress_set() wipes
++	 * the framebuffer with the progress background.  On this board the net
++	 * effect is a completely black panel with no kernel output whatsoever,
++	 * which looks exactly like a dead boot even though the kernel keeps
++	 * running (the white bands drawn in arm_init are wiped here, which is why
++	 * they only "flash" for one frame).
++	 *
++	 * Force the on-screen text console back on so every kprintf from this
++	 * point on is visible.
++	 */
++	switch_to_video_console();
++	initialize_screen(NULL, kPETextScreen);
++
+ 	/*
+ 	 *	Initialize the shared region module.
+ 	 */

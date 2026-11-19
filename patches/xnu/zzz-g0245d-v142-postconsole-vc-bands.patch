@@ -1,0 +1,115 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+index 5d21004..e3fce61 100644
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -389,6 +389,7 @@ arm_init(
+ 	 * the g0245d_paint_stage symbol defined in start.s.
+ 	 */
+ 	extern void g0245d_paint_stage(int index);
++	extern void g0245d_vc_paint(int index);
+ 	g0245d_paint_stage(7);
+ 
+ 
+@@ -668,9 +669,11 @@ arm_init(
+ 		disableConsoleOutput = FALSE;     /* Allow printfs to happen */
+ 	}
+ 	PE_create_console();
++	g0245d_vc_paint(24);   /* v142 - console created */
+ 
+ 	/* setup console output */
+ 	PE_init_printf(FALSE);
++	g0245d_vc_paint(26);   /* v142 - PE_init_printf */
+ 
+ #if __arm64__
+ #if DEBUG
+@@ -679,8 +682,10 @@ arm_init(
+ #endif
+ 
+ 	cpu_machine_idle_init(TRUE);
++	g0245d_vc_paint(27);   /* v142 - cpu_machine_idle_init */
+ 
+ 	PE_init_platform(TRUE, &BootCpuData);
++	g0245d_vc_paint(28);   /* v142 - PE_init_platform */
+ 
+ #if __arm64__
+ 	extern bool cpu_config_correct;
+@@ -689,6 +694,7 @@ arm_init(
+ 	}
+ 
+ 	ml_map_cpu_pio();
++	g0245d_vc_paint(29);   /* v142 - ml_map_cpu_pio */
+ 
+ #if APPLE_ARM64_ARCH_FAMILY
+ 	configure_late_apple_regs(true);
+@@ -697,14 +703,18 @@ arm_init(
+ #endif
+ 
+ 	cpu_timebase_init(TRUE);
++	g0245d_vc_paint(30);   /* v142 - cpu_timebase_init */
+ 
+ #if KPERF
+ 	/* kptimer_curcpu_up() must be called after cpu_timebase_init */
+ 	kptimer_curcpu_up();
++	g0245d_vc_paint(31);   /* v142 - kptimer_curcpu_up */
+ #endif /* KPERF */
+ 
+ 	PE_init_cpu();
++	g0245d_vc_paint(32);   /* v142 - PE_init_cpu */
+ 	fiq_context_init(TRUE);
++	g0245d_vc_paint(33);   /* v142 - fiq_context_init */
+ 
+ 
+ #if HIBERNATION
+@@ -733,6 +743,7 @@ arm_init(
+ 
+ 	gDramBase = *dram_base;
+ 	gDramSize = *dram_size;
++	g0245d_vc_paint(34);   /* v142 - DT dram */
+ 
+ 	/*
+ 	 * Initialize the stack protector for all future calls
+@@ -746,6 +757,7 @@ arm_init(
+ 	 * against string vulnerabilities
+ 	 */
+ 	__stack_chk_guard &= ~(0xFFULL << 8);
++	g0245d_vc_paint(25);   /* v142 - before machine_startup */
+ 	machine_startup(args);
+ }
+ 
+diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
+index 4c1edf1..f33222d 100644
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -3301,3 +3301,32 @@ vc_set_progressmeter(int new_value)
+ }
+ 
+ #endif /* defined(XNU_TARGET_OS_OSX) */
++
++
++/* G0245D v142: paint white progress bands through the video console's own
++ * mapped framebuffer VA (vinfo.v_baseaddr) - the exact VA the console clears
++ * with, so it is guaranteed mapped, unlike the physmap VA v140 tried (faulted).
++ * Repaints 13..index each call so console clears between steps stay visible. */
++void
++g0245d_vc_paint(int index)
++{
++	unsigned char *base;
++	unsigned long bytes, row;
++	int i, k, h;
++
++	if (!vinfo.v_baseaddr || !vinfo.v_rowbytes || !vinfo.v_height) {
++		return;
++	}
++	base  = (unsigned char *)(uintptr_t)vinfo.v_baseaddr;
++	bytes = (unsigned long)vinfo.v_rowbytes;
++	for (k = 13; k <= index; k++) {
++		row = 700UL + 32UL * (unsigned long)(k - 13);
++		h   = 16;
++		if (row + (unsigned long)h > (unsigned long)vinfo.v_height) {
++			continue;
++		}
++		for (i = 0; i < h; i++) {
++			memset(base + (row + (unsigned long)i) * bytes, 0xFF, bytes);
++		}
++	}
++}

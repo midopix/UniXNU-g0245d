@@ -1,0 +1,23 @@
+diff --git a/pexpert/arm/pe_identify_machine.c b/pexpert/arm/pe_identify_machine.c
+--- a/pexpert/arm/pe_identify_machine.c
++++ b/pexpert/arm/pe_identify_machine.c
+@@ -42,9 +42,16 @@
+ 
+ 	(void)bootArgs;
+ 
+-	if (pe_arm_get_soc_base_phys() == 0) {
+-		return;
+-	}
++	/*
++	 * g0245d v131: do NOT early-return when the Apple-style "arm-io" node is
++	 * absent. This board's DT has no arm-io, so pe_arm_get_soc_base_phys()
++	 * returns 0 and the original code bailed out BEFORE setting any defaults,
++	 * leaving gPEClockFrequencyInfo zeroed. rtclock_early_init() then calls
++	 * PE_call_timebase_callback() with num=0/den=1, and timebase_callback()
++	 * panics ("invalid constant 0 / 1") with no console up yet -> silent hang.
++	 * Keep the defaults so the timebase is valid; the /cpus loop simply finds
++	 * no "state" property and leaves the default frequency in place.
++	 */
+ 
+ 	/* Clear the gPEClockFrequencyInfo struct */
+ 	bzero((void *)&gPEClockFrequencyInfo, sizeof(clock_frequency_info_t));

@@ -1,0 +1,76 @@
+diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -781,20 +781,19 @@
+ 	 */
+ 	{
+ 		extern void g0245d_mmss_recover(void);
++		extern void g0245d_fb_paint_mapped(void);
+ 		extern void g0245d_halt(void);
+ 
+ 		g0245d_mmss_recover();
+ 
+ 		/*
+-		 * G0245D v169: freeze here. v168 ran the same recovery and still went
+-		 * black, but without a halt we could not tell whether the replay did
+-		 * anything - the kernel simply carried on and the panel died at some
+-		 * unknown later point. Freezing removes that ambiguity: if the MMSS
+-		 * replay revived MDP5, the two white blocks painted in arm_init are on
+-		 * screen right now and stay there; if the panel is black, the replay
+-		 * did not bring the display back and the GDSCs had really collapsed
+-		 * (so a full mode set is required).
++		 * G0245D v170: try to paint rows 1000..1160 through ml_io_map.
++		 * Nothing has ever been drawn up there, so if a white band appears the
++		 * mapping works and we finally have a kernel-side way to draw without
++		 * borrowing the loader's page table.
+ 		 */
++		g0245d_fb_paint_mapped();
++
+ 		g0245d_halt();
+ 	}
+ 
+diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -3572,3 +3572,41 @@
+ 	g0245d_mmss_branch(cc, 0x002328); /* MDSS_VSYNC_CBCR */
+ 	g0245d_mmss_branch(cc, 0x002344); /* MDSS_ESC0_CBCR */
+ }
++
++/*
++ * G0245D v170: paint through ml_io_map instead of the borrowed loader table.
++ *
++ * v169 showed two white blocks after the MMSS replay (photo), so the borrowed
++ * TTBR0 recipe still works and the kernel does reach deep into machine_startup.
++ * But it also showed something new: the panel went black even while the kernel
++ * was HALTED in a tight loop - no WFI, no idle, MDP5 should have kept scanning
++ * DRAM forever. So the display is being switched off by hardware (power rail /
++ * DSI link), not by any code path.
++ *
++ * That leaves one purely mechanical question: can we get a writable window onto
++ * the framebuffer from inside the kernel? v155 tried ml_io_map_unmappable()
++ * (an MMIO-specific variant) and got nothing. Plain ml_io_map() is what v168
++ * uses successfully for MMSS_CC, and it maps with VM_WIMG_IO (device, non
++ * cacheable) which is exactly right for a DMA-fed framebuffer.
++ *
++ * Rows 1000..1160 are used because nothing else has ever been painted there, so
++ * a white band up there is unambiguous proof.
++ */
++void
++g0245d_fb_paint_mapped(void)
++{
++	extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++	vm_offset_t            va;
++	volatile unsigned int *p;
++	unsigned long          n;
++
++	va = ml_io_map((vm_offset_t)0x83401000UL, (vm_size_t)0x23ff000UL);
++	if (va == 0) {
++		return;
++	}
++
++	p = (volatile unsigned int *)(unsigned long)(va + 1000UL * 0xCA8UL);
++	for (n = 0; n < (160UL * 0xCA8UL / 4UL); n++) {
++		p[n] = 0xFFFFFFFFU;
++	}
++}

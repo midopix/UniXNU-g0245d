@@ -1,0 +1,22 @@
+diff --git a/SETUP/installfile/installfile.c b/SETUP/installfile/installfile.c
+index 8e1c914..ef69580 100644
+--- a/SETUP/installfile/installfile.c
++++ b/SETUP/installfile/installfile.c
+@@ -111,10 +111,13 @@ main(int argc, char * argv[])
+ 		err(EX_UNAVAILABLE, "fcopyfile(%s, %s)", src, dsttmpname);
+ 	}
+ 
+-	ret = futimes(dstfd, NULL);
+-	if (ret < 0) {
+-		err(EX_UNAVAILABLE, "futimes(%s)", dsttmpname);
+-	}
++	/*
++	 * G0245D/Linux: futimes(fd, NULL) is refused with EPERM by the build
++	 * sandbox. Only the installed bytes and mode matter here; the freshly
++	 * created temporary file already carries a current timestamp, so make
++	 * still considers the target up to date. Do not abort the build.
++	 */
++	(void)futimes(dstfd, NULL);
+ 
+ 	if (gotmode) {
+ 		ret = fchmod(dstfd, mode);

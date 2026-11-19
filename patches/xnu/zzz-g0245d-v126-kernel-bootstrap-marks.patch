@@ -1,0 +1,84 @@
+diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -499,6 +499,11 @@
+ void
+ machine_startup(__unused boot_args * args)
+ {
++	extern void g0245d_paint_stage(int index);
++
++	/* g0245d v126: stage 22 - entered machine_startup() from arm_init() */
++	g0245d_paint_stage(22);
++
+ #if defined(HAS_IPI) && (DEVELOPMENT || DEBUG)
+ 	if (!PE_parse_boot_argn("fastipi", &gFastIPI, sizeof(gFastIPI))) {
+ 		gFastIPI = 1;
+@@ -508,6 +513,8 @@
+ 
+ 	machine_conf();
+ 
++	/* g0245d v126: stage 23 - machine_conf() done, about to call kernel_bootstrap() */
++	g0245d_paint_stage(23);
+ 
+ 	/*
+ 	 * Kick off the kernel bootstrap.
+diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -422,6 +422,11 @@
+ void
+ kernel_bootstrap(void)
+ {
++	extern void g0245d_paint_stage(int index);
++
++	/* g0245d v126: stage 24 - entered kernel_bootstrap() */
++	g0245d_paint_stage(24);
++
+ 	kern_return_t   result;
+ 	thread_t        thread;
+ 	char            namep[16];
+@@ -432,8 +437,14 @@
+ 
+ 	scale_setup();
+ 
++	/* g0245d v126: stage 25 - scale_setup() done, before vm_mem_bootstrap() */
++	g0245d_paint_stage(25);
++
+ 	kernel_bootstrap_log("vm_mem_bootstrap");
+ 	vm_mem_bootstrap();
++
++	/* g0245d v126: stage 26 - vm_mem_bootstrap() done (page tables may have switched) */
++	g0245d_paint_stage(26);
+ 
+ 	machine_info.memory_size = (uint32_t)mem_size;
+ #if XNU_TARGET_OS_OSX
+@@ -479,6 +490,9 @@
+ 	kernel_bootstrap_log("console_init");
+ 	console_init();
+ 
++	/* g0245d v126: stage 27 - console_init() done */
++	g0245d_paint_stage(27);
++
+ 	kernel_bootstrap_log("stackshot_init");
+ 	stackshot_init();
+ 
+@@ -499,6 +513,9 @@
+ 	kernel_bootstrap_log("PMAP_ACTIVATE_KERNEL");
+ 	PMAP_ACTIVATE_KERNEL(master_cpu);
+ 
++	/* g0245d v126: stage 28 - PMAP_ACTIVATE_KERNEL() done */
++	g0245d_paint_stage(28);
++
+ 	kernel_bootstrap_log("mapping_free_prime");
+ 	mapping_free_prime();                                           /* Load up with temporary mapping blocks */
+ 
+@@ -510,6 +527,9 @@
+ 
+ 	kernel_bootstrap_log("clock_init");
+ 	clock_init();
++
++	/* g0245d v126: stage 29 - clock_init() done */
++	g0245d_paint_stage(29);
+ 
+ 	/*
+ 	 *	Initialize the IPC, task, and thread subsystems.

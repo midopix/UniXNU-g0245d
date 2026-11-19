@@ -1,0 +1,15 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+index 5d21004..6a87ed0 100644
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -668,6 +668,10 @@ arm_init(
+ 		disableConsoleOutput = FALSE;     /* Allow printfs to happen */
+ 	}
+ 	PE_create_console();
++	/* G0245D v143: serial=3 + an enumerated UART switched the console to a
++	 * dead ttyHSL0 above, so the fb was cleared (black) and got no output.
++	 * Force kprintf back onto the video console so the boot log is visible. */
++	(void)switch_to_video_console();
+ 
+ 	/* setup console output */
+ 	PE_init_printf(FALSE);

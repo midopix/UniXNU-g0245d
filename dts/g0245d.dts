@@ -149,9 +149,56 @@
 &cpu2 { status = "disabled"; };
 &cpu3 { status = "disabled"; };
 
-// Peripheral enablement follows component availability:
-//   Stage 1: &blsp2_uart2 (serial console, stock console=ttyHSL0,115200,n8)
-//   Stage 2: &ufshc, &ufsphy        (NativeUfs8996)
-//   Stage 3: &dsi0, &mdp, &blsp2_i2c6 (Mdp5 + BlspI2c + panel/touch)
-//   Stage 4: &gpu, &adreno_smmu     (Adreno530)
-//   Stage 5: &pcie*                 (QCA6174 Wi-Fi)
+// ---------------------------------------------------------------------------
+// Peripheral enablement — this is what actually exposes hardware to XNU.
+//
+// devicetree.py builds the ADT arm-io node from hardware DTS entries that
+// (a) carry "unixnu,adt-name" and (b) pass enabled(), which requires status
+// to be absent/"okay"/"ok" on the node AND every parent. The SoC dtsi ships
+// every peripheral as status="disabled" (mainline convention), so leaving
+// them untouched exports only intc / rpm-msg-ram / tcsr-mutex. The three
+// MSM8996 drivers linked into kernel.macho would then never be matched by
+// IOKit: no IOPlatformDevice nub exists for ufshc / gpu / blsp2-i2c6.
+//
+// These overrides close that gap. They deliberately enable ONLY the three
+// nodes that have a linked register-probe driver, so the first device boot
+// exercises a small, known set of MMIO reads. None of these drivers brings
+// up the hardware (see the drivers/*/README.md "probe scope" notes).
+// ---------------------------------------------------------------------------
+
+// Stage 2: UFS 2.0 host controller (NativeUfs8996, libNativeUfs8996.a).
+&ufshc { status = "okay"; };
+
+// Stage 3: BLSP2 QUP6 in I2C mode (Blsp8996 / BlspI2c.cpp). This is the
+// board's touch bus (Synaptics DSX @ 0x20). The alias node &blsp2_spi6
+// overlaps the same register window and stays disabled.
+&blsp2_i2c6 { status = "okay"; };
+
+// Stage 4: Adreno 530 GPU (NativeAdreno530.cpp). A5xx register offsets are
+// still unqualified against the A530 TRM; this only makes the nub exist.
+&gpu { status = "okay"; };
+
+// Deliberately NOT enabled yet (each needs either an owning driver or a
+// device-tree fix first):
+//   &ufsphy, &adreno_smmu  - no linked driver component yet; enabling them
+//                            only creates unmatched nubs.
+//   &mdss, &mdp, &dsi0,
+//   &dsi0_phy              - these children use 1-cell addressing under mdss,
+//                            but mdss has no "ranges" property. Enabling them
+//                            makes devicetree.py physical() raise
+//                            "ranges is required for address translation".
+//                            Fix the bus description before enabling MDP5/DSI.
+//   &blsp2_uart2           - the early console is wired through the XNU
+//                            pexpert patch, not an IOPlatformDevice driver;
+//                            the board has no serial readback anyway.
+//   &pcie0/1/2, &usb3      - QCA6174 / USB stages, no driver yet.
+//   cpu1..cpu3             - disabled above; re-enable after the GICv3 3-cell
+//                            specifier path is confirmed on hardware.
+//
+// HARDWARE QUALIFICATION NOTE: enabling a node makes XNU map its MMIO and
+// lets the probe read it. If a block is clock-gated or held in reset at that
+// point the read may return 0 / all-ones (the drivers treat that as a failed
+// probe and do NOT register a service) or raise a synchronous abort. The
+// first device boot must observe these three nodes before any further
+// peripheral is enabled; if any aborts, gate the read behind the GCC clock
+// enable rather than re-enabling the node blindly.

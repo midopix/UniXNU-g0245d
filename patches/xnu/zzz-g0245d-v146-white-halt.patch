@@ -1,0 +1,18 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+index c9ccd40..f2a434f 100644
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -624,6 +624,13 @@ arm_init(
+ 			g0245d_fb[g0245d_i] = 0xFFFFFFFFu;
+ 		}
+ 	}
++	/* G0245D v146: halt right after the v145 full-white fill so the screen
++	 * stays permanently white (or permanently black) instead of flashing
++	 * white for one frame. Removes the transient: white => fb writes to
++	 * 0xC3401000 really reach the panel; black => they do not. */
++	for (;;) {
++		__asm__ __volatile__("wfe" ::: "memory");
++	}
+ 	arm_vm_init(xmaxmem, args);
+ 
+ 	if (debug_boot_arg) {

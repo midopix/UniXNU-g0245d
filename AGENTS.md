@@ -58,6 +58,10 @@ completion levels for both maintainer and agent work.
 
 - GICv3 uses `#interrupt-cells = <3>` (SM8550 uses 4): verify the ArmCpu
   3-cell path before enabling `cpu1..cpu3` in `dts/g0245d.dts`.
+- `PcdArmArchTimer*IntrNum` takes GIC INTIDs, not the device-tree PPI index.
+  MSM8996 PPIs 13/14/11/10 are INTIDs 29/30/27/26; the wrong values register the
+  timer handler on SGIs and silently kill every `EVT_TIMER` consumer. Read
+  `docs/timer-ppi-finding.md` before touching timer, keypad or BDS code.
 - The display is MDP5 + DSI 0 video mode with the FocalTech ft8716 panel;
   the decoded DCS sequence lives in `dts/panel-ft8716.txt`.
 - The touch controller is Synaptics DSX on BLSP2 I2C (`i2c@75ba000`, SPI 106);
@@ -66,3 +70,13 @@ completion levels for both maintainer and agent work.
   the network area of `porting.toml`.
 - Reverse-engineering tasks follow `REA-WORKFLOW.md`; record every result
   with its command and output in the matching `porting.toml` area.
+
+## Current state
+
+Stage 1 is closed: the firmware builds, the BootShim container boots on hardware
+and the menu renders. Stage 2 is blocked on two things, both recorded in
+`porting.toml`: the payload chain (`UniXNURamDiskDxe` + DiskIoDxe + Fat) is not in
+the FD yet, and the five board XNU patches in `patches/xnu/series` do not exist.
+`docs/pitfalls.md` is required reading before changing the build: the toolchain tag
+is pinned in four places, EDK2's `cp -p` fails by policy, and `strings` on the FD
+can never show new code because `FVMAIN` is LZMA-wrapped.

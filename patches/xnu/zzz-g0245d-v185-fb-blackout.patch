@@ -1,0 +1,65 @@
+Subject: [PATCH] g0245d v185: black the whole framebuffer (liveness)
+
+diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -3533,6 +3533,47 @@
+ 	__asm__ __volatile__("dsb sy" ::: "memory");
+ }
+ 
++
++/*
++ * G0245D v185: black the whole framebuffer. Deliberately brutal.
++ *
++ * v184 painted a 200-row band through the physmap and nothing appeared, so two
++ * explanations remain: (a) the kernel never reaches arm_init()'s post-
++ * arm_vm_init code, or (b) the physmap address arithmetic is wrong. A 200-row
++ * band cannot separate those, but a wholly black panel can: there is no loader
++ * UI, no boot-menu chrome and no stale content that looks black by accident.
++ *
++ * Full-panel size is 1080 * 1920 * 3 = 6220800 bytes (0x5EE600), not the
++ * 0x200000 that earlier probes used -- 2MiB only covers about 640 rows, which
++ * is another reason some earlier paints may have landed entirely off-screen.
++ *
++ * Stores go through the physmap (built by arm_vm_init, Normal cacheable) and
++ * are then cleaned to the point of coherency so the scanout engine, which reads
++ * DRAM by DMA, actually sees them.
++ */
++void
++g0245d_fb_blackout(void)
++{
++	const uint64_t fb_pa    = 0x83401000ULL;
++	const uint64_t fb_bytes = 6220800ULL;    /* 1080 * 1920 * 3 */
++	uint64_t       va;
++	uint64_t       i;
++
++	if ((gVirtBase == 0) || (gPhysBase == 0)) {
++		return;
++	}
++	va = (uint64_t)gVirtBase + (fb_pa - (uint64_t)gPhysBase);
++
++	for (i = 0; i + 8ULL <= fb_bytes; i += 8ULL) {
++		*(volatile uint64_t *)(uintptr_t)(va + i) = 0ULL;
++	}
++
++	for (i = 0; i < fb_bytes; i += 64ULL) {
++		__asm__ __volatile__("dc civac, %0" :: "r"(va + i) : "memory");
++	}
++	__asm__ __volatile__("dsb sy" ::: "memory");
++}
++
+ /*
+  * G0245D v168: bring the MMSS display power domains and clocks back up.
+  *
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -848,6 +848,8 @@
+ 	{ extern void g0245d_fb_mark(int n); g0245d_fb_mark(1); }
+ 	/* G0245D v184: physmap + cache clean probe (earliest after arm_vm_init). */
+ 	{ extern void g0245d_fb_probe(void); g0245d_fb_probe(); }
++	/* G0245D v185: black the whole panel (unmistakable liveness signal). */
++	{ extern void g0245d_fb_blackout(void); g0245d_fb_blackout(); }
+ 	PE_create_console();
+ 	/* G0245D v143: serial=3 + an enumerated UART switched the console to a
+ 	 * dead ttyHSL0 above, so the fb was cleared (black) and got no output.

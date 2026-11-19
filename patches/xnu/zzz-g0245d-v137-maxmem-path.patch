@@ -1,0 +1,65 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -376,7 +376,7 @@
+ 	boot_args       *args)
+ {
+ 	unsigned int    maxmem;
+-	uint32_t        memsize;
++	uint32_t        memsize = 0;
+ 	uint64_t        xmaxmem;
+ 	thread_t        thread;
+ 	DTEntry chosen = NULL;
+@@ -541,13 +541,24 @@
+ 	/* g0245d v128: sub 17 - processor_bootstrap() done, before arm_vm_init() */
+ 	g0245d_paint_stage(18);
+ 
++	/*
++	 * g0245d v137: do NOT call PE_get_default() here. When the ADT has no
++	 * /defaults node (this board's ADT has none) it falls through to
++	 * IODTGetDefault() -> IORegistryEntry::fromPath("/defaults", gIODTPlane),
++	 * i.e. into the IOKit registry while we are still in arm_init(). Worse,
++	 * "memsize" is an uninitialised local, so any TRUE return would set xmaxmem
++	 * to stack garbage - and arm_vm_init() uses that value to CLAMP mem_size
++	 * ("if (memory_size != 0 && mem_size > memory_size) mem_size = memory_size;").
++	 * Default to 0 instead, which makes arm_vm_init() use args->memSize.
++	 */
+ 	if (PE_parse_boot_argn("maxmem", &maxmem, sizeof(maxmem))) {
+ 		xmaxmem = (uint64_t) maxmem * (1024 * 1024);
+-	} else if (PE_get_default("hw.memsize", &memsize, sizeof(memsize))) {
+-		xmaxmem = (uint64_t) memsize;
+ 	} else {
+ 		xmaxmem = 0;
+ 	}
++	(void)memsize;
++
++	g0245d_paint_stage(19);   /* v137: maxmem resolution done */
+ 
+ #if SCHED_HYGIENE_DEBUG
+ 	{
+@@ -575,6 +586,8 @@
+ 
+ 	nanoseconds_to_absolutetime(XCALL_ACK_TIMEOUT_NS, &xcall_ack_timeout_abstime);
+ 
++	g0245d_paint_stage(20);   /* v137: nanoseconds_to_absolutetime done */
++
+ #if HAS_BP_RET
+ 	PE_parse_boot_argn("bpret", &bp_ret, sizeof(bp_ret));
+ 	set_bp_ret(); // Apply branch predictor retention settings to boot CPU
+diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -2491,13 +2491,9 @@
+ 	mt_early_init();
+ #endif /* CONFIG_CPU_COUNTERS */
+ 
+-	g0245d_paint_stage(19);
+-
+ 	arm_set_user_tbi();
+ 
+ 	arm_vm_physmap_init(args);
+-	g0245d_paint_stage(20);
+-
+ 	set_mmu_ttb_alternate(cpu_ttep & TTBR_BADDR_MASK);
+ 
+ #if XNU_MONITOR

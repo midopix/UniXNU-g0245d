@@ -1,0 +1,136 @@
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -142,12 +142,32 @@
+ 	/*
+ 	 * g0245d_paint_stage(index): paint one solid white band at the mapped
+ 	 * framebuffer VA. Called only after the MMU is on. Clobbers x0-x6.
++	 * v124: rebase-safe (immediate VA/stride), three strips:
++	 *   0..7   row 200 + 64*i,  32 rows (main / pre-MMU + arm_init entry)
++	 *   8..12  row   8 + 40*i,  24 rows (common_start sub-stages)
++	 *   13..21 row 700 + 32*i,  16 rows (arm_init sub-stages)
+ 	 */
+ 	.text
+ 	.align 2
+ 	.globl EXT(g0245d_paint_stage)
+ LEXT(g0245d_paint_stage)
+-	cmp	x0, #8
++	cmp	x0, #13
++	b.lt	4f
++	/* g0245d v124: arm_init() sub-stages (index 13..21) use a third strip:
++	 * row = 700 + 32*(index-13), 16 rows tall. The 32-row pitch is
++	 * deliberately different from the 64-row main strip and the 40-row
++	 * v123 sub-strip, so a photo can separate all three groups by gap
++	 * ratio alone, independent of panel rotation or camera framing.
++	 * v123 footage showed fb row and screen y are inverted on this panel,
++	 * which puts rows 700+ in the upper dark area, not off-screen. */
++	sub	x0, x0, #13
++	mov	x3, #700
++	mov	x4, #32
++	mul	x4, x0, x4
++	add	x3, x3, x4
++	mov	x6, #16
++	b	3f
++4:	cmp	x0, #8
+ 	b.lt	2f
+ 	/* g0245d v123: sub-stages (index 8..12) use a compact geometry in the
+ 	 * dark strip ABOVE the main bands: row = 8 + 40*(index-8), 24 rows
+@@ -166,14 +186,15 @@
+ 	add	x3, x3, x4			// x3 = 200 + 64*index (row)
+ 	mov	x6, #32
+ 3:
+-	adrp	x1, EXT(g0245d_fb_base)@page
+-	add	x1, x1, EXT(g0245d_fb_base)@pageoff
+-	ldr	x1, [x1]			// x1 = framebuffer mapped VA
+-	cbz	x1, 9f
+-	adrp	x2, EXT(g0245d_fb_rowbytes)@page
+-	add	x2, x2, EXT(g0245d_fb_rowbytes)@pageoff
+-	ldr	x2, [x2]			// x2 = row bytes
+-	cbz	x2, 9f
++	/* g0245d v124: load the framebuffer VA and stride as immediates.
++	 * v122/v123 read them from .data via adrp+ldr, but
++	 * arm_slide_rebase_and_sign_image() rebases .data pointers; if those
++	 * quads are treated as pointers they become a slid, invalid VA and
++	 * every band painted after arm_init's first call silently vanishes.
++	 * Immediates make the helper valid across __startup_func rebasing. */
++	movz	x1, #0xC340, lsl #16
++	movk	x1, #0x1000			// x1 = 0xC3401000
++	movz	x2, #0xCA8			// x2 = 3240 (1080 * 3)
+ 	mul	x3, x3, x2			// byte offset = row * rowbytes
+ 	add	x1, x1, x3			// pixel base VA
+ 	mov	x4, x6
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -362,15 +362,23 @@
+ 	extern void g0245d_paint_stage(int index);
+ 	g0245d_paint_stage(7);
+ 
++	/* g0245d v124: stage 13 - C-side third strip works before slide/rebase */
++	g0245d_paint_stage(13);
++
+ 	arm_setup_pre_sign();
+ 
+ 	arm_slide_rebase_and_sign_image();
++
++	/* g0245d v124: stage 14 - survived slide+rebase+sign; paint still valid */
++	g0245d_paint_stage(14);
+ 
+ 	/* If kernel integrity is supported, use a constant copy of the boot args. */
+ 	const_boot_args = *args;
+ 	BootArgs = args = &const_boot_args;
+ 
+ 	cpu_data_init(&BootCpuData);
++	/* g0245d v124: stage 15 - BootCpuData initialised */
++	g0245d_paint_stage(15);
+ #if defined(HAS_APPLE_PAC)
+ 	/* bootstrap cpu process dependent key for kernel has been loaded by start.s */
+ 	BootCpuData.rop_key = ml_default_rop_pid();
+@@ -378,6 +386,8 @@
+ #endif /* defined(HAS_APPLE_PAC) */
+ 
+ 	PE_init_platform(FALSE, args); /* Get platform expert set up */
++	/* g0245d v124: stage 16 - platform expert up (first PE call) */
++	g0245d_paint_stage(16);
+ 
+ #if __arm64__
+ 	configure_timer_apple_regs();
+@@ -385,7 +395,11 @@
+ 	wfe_timeout_init();
+ 
+ 	configure_misc_apple_boot_args();
++	/* g0245d v124: stage 17 - about to touch Apple-private misc registers */
++	g0245d_paint_stage(17);
+ 	configure_misc_apple_regs(true);
++	/* g0245d v124: stage 18 - survived configure_misc_apple_regs(true) */
++	g0245d_paint_stage(18);
+ 
+ #if (DEVELOPMENT || DEBUG)
+ 	unsigned long const *platform_stall_ptr = NULL;
+@@ -466,6 +480,8 @@
+ 	    - (uintptr_t)(args->virtBase)));
+ 
+ 	thread = thread_bootstrap();
++	/* g0245d v124: stage 19 - bootstrap thread created */
++	g0245d_paint_stage(19);
+ 	thread->machine.CpuDatap = &BootCpuData;
+ 	thread->machine.pcpu_data_base = (vm_offset_t)0;
+ 	machine_set_current_thread(thread);
+@@ -597,6 +613,8 @@
+ 
+ 	/* setup console output */
+ 	PE_init_printf(FALSE);
++	/* g0245d v124: stage 20 - printf/console path up */
++	g0245d_paint_stage(20);
+ 
+ #if __arm64__
+ #if DEBUG
+@@ -672,6 +690,8 @@
+ 	 * against string vulnerabilities
+ 	 */
+ 	__stack_chk_guard &= ~(0xFFULL << 8);
++	/* g0245d v124: stage 21 - leaving arm_init, about to enter machine_startup */
++	g0245d_paint_stage(21);
+ 	machine_startup(args);
+ }
+ 

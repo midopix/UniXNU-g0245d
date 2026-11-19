@@ -1,64 +1,750 @@
-apple-only-cpu-tunables.patch
-architectural-timer-entry.patch
-armvirt-platform-personality.patch
-cxx-flag-dependencies.patch
-disabled-deferred-reclaim.patch
-external-archive-dependencies.patch
-kernel-sdk-root.patch
-local-availability.patch
-mockfs-intermediate-lookup.patch
-mockfs-memory-device-width.patch
-mockfs-statfs.patch
-mockfs-test-file.patch
-mockfs-typed-allocation.patch
-native-4k-bootstrap-capacity.patch
-native-4k-signature-hash-cache.patch
-native-4k-user-abi.patch
-native-aes-personality.patch
-native-arm-pan.patch
-native-dt-panic-region.patch
-native-lookup-trace.patch
-native-priv-work-interval.patch
-native-quiet-managed-page-report.patch
-native-text-fixup.patch
-native-trust-cache-runtime.patch
-native-union-getattrlistbulk.patch
-native-union-lower-directory.patch
-native-work-interval-soft-fail.patch
-native-work-interval-trace.patch
-native-work-interval-instance.patch
-non-apple-cache-monitor.patch
-non-apple-iommu-bootstrap.patch
-non-apple-pmap-field.patch
-null-root-media.patch
-offline-component-load-probes.patch
-offline-legacy-start.patch
-offline-native-gpu-broker.patch
-offline-owner-boot-manifest.patch
-offline-owner-cache-carrier.patch
-offline-owner-root-binding-audit.patch
-offline-owner-root-crypto-probe.patch
-offline-owner-systemos-mount.patch
-offline-owner-z-air-init.patch
-offline-pgz-alignment-probe.patch
-public-entitlements-header.patch
-source-corecrypto14-bootstrap.patch
-source-machine-layer.patch
-source-pthread-bootstrap.patch
-zzw-native-adreno-sandbox-grant.patch
-zzwb-native-sandbox-grant-set-properties.patch
-zzx-pmap-sync-64bit-pa.patch
-zzy-native-gpu-addon-mount.patch
-zzy-staged-system-apps.patch
-zzyb-native-cryptex-os-view.patch
-zzyc-owner-skip-launch-constraints.patch
-native-smp-secondary.patch
-sheng-platform-power.patch
-zzz-boot-progress.patch
-xnu-8796.101.5-security-init.patch
-xnu-8796.101.5-sparse-index.patch
-linux-clang-auto-var-init.patch
-linux-clang-uio-stackbuf-align.patch
-linux-clang-kalloc-pointee-type.patch
-linux-clang-iorpc-kernel-content.patch
-xnu-8796-arm64-kpc-backend.patch
+# UniXNU-g0245d board XNU patches.
+#
+# SoC-level MSM8996 patches (SMP/cluster, GICv3 3-cell, BLSP, SMMU v2, UFS 2.0,
+# MDP5) live in UniXNU-msm8996-common/patches/xnu/series and are pulled in via
+# the "soc:patches/xnu/series" entry in board.toml's kernel.patch_series.
+#
+# Device-specific patches (board wiring, ADT overrides) go here as needed.
+#
+# G0245D/Linux build host: the Linux port of XNU's installfile calls
+# futimes(fd, NULL) unconditionally, which the build sandbox refuses with
+# EPERM whenever the export headers are regenerated. Ignoring the timestamp
+# failure keeps the installed bytes and mode intact.
+zzz-g0245d-linux-installfile-futimes.patch
+
+# G0245D bring-up: three solid white bands painted into the firmware framebuffer
+# from osfmk/arm64/start.s while the MMU is still off (stage 0 = entered
+# start_first_cpu, 1 = bootstrap page tables built, 2 = about to enable the MMU).
+# This board has no serial console and the tree has no arm64 framebuffer console,
+# so counting the bands is the only way to see how far the kernel gets.
+zzz-g0245d-early-boot-marks.patch
+
+# G0245D v122 bring-up: post-MMU progress bands. Maps the firmware framebuffer as
+# a 1GB device block at L1 index 3 of the V=P (TTBR0) table (VA 0xC3401000 ->
+# PA 0x83401000, avoiding the kernel-window index-2 collision) and paints
+# stage 6 (MMU transition succeeded) from start.s plus stage 7 (entered
+# arm_init) from arm_init.c. [v122 hardware result: 7 bands, stage 7 never lit.]
+# The cause was NOT the Apple SoC register blocks: G0245D_PAINT used `bl`
+# without preserving lr, which holds the arm_init return address, so the final
+# `ret` looped inside common_start instead of entering C.
+zzz-g0245d-v122-postmmu-marks.patch
+
+# G0245D v123 bring-up: (1) protect lr in G0245D_PAINT with x19, matching XNU's
+# own set_nex_pg / set_mmu_ttb convention; (2) disable APPLY_TUNABLES and
+# CPU_OVRD, two Apple-private system-register blocks that are UNDEFINED on
+# MSM8996/Kryo; (3) add stage 8..12 sub-bands in a compact dark strip above the
+# main bands so one flash tells us exactly how far the kernel gets.
+# Read-out: stage 7 visible => entered arm_init (lr fix worked). If still stuck,
+# the last visible sub-band names the exact instruction group that faults.
+zzz-g0245d-v123-lr-fix-and-substages.patch
+
+# G0245D v124 bring-up: v123 hardware result = all 13 bands lit (main 0..7 +
+# sub 8..12), so stage 7 (arm_init entry) was reached and the lr fix worked.
+# (1) Make g0245d_paint_stage rebase-safe: v122/v123 loaded the framebuffer VA
+# and stride from .data via adrp+ldr, but arm_slide_rebase_and_sign_image()
+# rebases .data pointers, so every post-rebase band could silently write to a
+# slid, invalid VA. Load them as immediates instead.
+# (2) Add a third strip, index 13..21 (row 700 + 32*(i-13), 16 rows, pitch 32
+# deliberately distinct from 64/40 so the three groups separate by gap ratio),
+# and paint nine marks inside arm_init(): before/after slide+rebase+sign,
+# cpu_data_init, PE_init_platform(FALSE), before/after configure_misc_apple_regs,
+# thread_bootstrap, PE_init_printf, and just before machine_startup.
+# No functional changes: one patch series step verifies one hypothesis.
+zzz-g0245d-v124-arm-init-substages.patch
+
+# G0245D v125 bring-up: v124 hardware readout = main 8 + sub 5 + third-strip 4
+# bands, i.e. stage 13/14/15/16 lit and 17..21 dark. Stage 14 lit proves the
+# rebase-safe immediate-based paint helper works after slide+rebase+sign.
+# The fault sits between stage 16 (after PE_init_platform(FALSE)) and stage 17.
+# NOTE (verified in machine_routines_apple.c): on non-Apple builds
+# configure_misc_apple_boot_args / configure_misc_apple_regs /
+# configure_timer_apple_regs are EMPTY no-ops. The only calls here with real
+# code are wfe_timeout_configure() (divides by timebase_frequency_hz, computes
+# arm64_eventi) and wfe_timeout_init() -> _enable_timebase_event_stream(), which
+# mrs/msr CNTKCTL_EL1 and enables the event stream. So this is an elimination
+# experiment: skip the whole block and see whether stage 17 lights. If it does
+# not, the fault is NOT in these calls (look at PE_init_platform side effects /
+# pending interrupts / exception vectors instead) and v126 must add finer marks.
+# stage 17/18 marks are kept OUTSIDE the disabled blocks so the band geometry
+# and readout stay identical; stages 19/20/21 show how far past arm_init we get.
+zzz-g0245d-v125-disable-apple-regs.patch
+# v126: v125 photo showed all 9 third-strip bands (13..21) lit -> arm_init()
+# fully passed. Extend the SAME third strip (start.s index>=13 -> row 700+32*(i-13),
+# so 22..29 land at rows 988..1212 with no asm change) into machine_startup()
+# and kernel_bootstrap(): entries, scale_setup, vm_mem_bootstrap, console_init,
+# PMAP_ACTIVATE_KERNEL, clock_init. If 26+ go dark, distinguish "died in VM init"
+# from "bootstrap V=P framebuffer mapping lost after pmap rebuild" before v127.
+zzz-g0245d-v126-kernel-bootstrap-marks.patch
+# v127: v126 photo showed NO new bands above the third strip (新增区亮度
+# 82.0 vs v125 80.4, 白占比增量 -0.005) while the BootShim blue menu item
+# stayed intact -> rows 988..1212 are past this panel visible area (~960),
+# not necessarily a kernel hang. Remap the eight v126 call sites from index
+# 22..29 back to 13..20 (rows 700..924, proven visible by the v125 photo),
+# and delete arm_init stages 13..20. NOTE (2026-11-10, corrected by v127 photo):
+# "v125 already proved arm_init completes" was WRONG - the v125 "9 bands lit"
+# readout came from a bad template alignment; v125 actually stopped between
+# thread_bootstrap() and PE_init_printf(). v127's whole third strip came back
+# dark (lum 45 / white 0.031) while main+sub strips stayed lit, i.e. the
+# kernel never reaches arm_init()'s end. See v128.
+# stage 21 stays at row 956 as a self-check: if only it is lit, the kernel
+# really died entering machine_startup(); if N lower bands are lit it reached
+# stage 22+N-1 and v126 was only an off-screen geometry artefact.
+# start.s is untouched: zero asm risk.
+zzz-g0245d-v127-visible-strip-remap.patch
+# v128: v127 photo -> K=0 (third strip completely dark, clean low-luminance
+# dark region, NOT moire flattening: lum 45.2 / white 0.031 / contrast 6.3,
+# versus v126's flattened lum 147 / white 0.53 / contrast 10). Main strip 8
+# and sub strip 6 all lit -> paint() still works, arm_init() just never
+# finishes. So move all nine visible slots (index 13..21) back into the
+# thread_bootstrap() -> PE_init_printf() window as eight fine-grained marks
+# (machine_set_current_thread / cpu_bootstrap / kernel_startup_bootstrap /
+# processor_bootstrap / arm_vm_init PAGE-TABLE BOUNDARY / serial_init /
+# PE_create_console) plus the stage-21 self-check at arm_init()'s end.
+# Delete v127's eight remapped calls in machine_startup()/kernel_bootstrap():
+# the kernel provably never reaches them and they would repaint the same rows.
+# K lit bands = last sub-stage reached (1..8), K=9 means arm_init() completed.
+# start.s untouched: index>=13 still row=700+32*(index-13).
+zzz-g0245d-v128-arm-init-substages.patch
+# v129: v128 photo -> K=3 (third strip slots 13/14/15 lit 0.99/0.90/0.86,
+# 16..21 dark 0.04~0.16). So the kernel DOES run: it dies between
+# cpu_bootstrap() (band 15) and kernel_startup_bootstrap()'s return (band 16).
+# arm_init's own 16..21 marks are unreachable, so relocating them into
+# startup.c is conflict-free. This patch only touches osfmk/kern/startup.c:
+#   16 = entered kernel_startup_bootstrap()
+#   17 = n/size checks passed (n should be ~4006, section __init_entry_set 96KB)
+#   18 = qsort() of 4006 entries returned
+#   19 = entered kernel_startup_initialize_upto() (assert passed)
+#   20 = first entry of subsystem 2 (TIMEOUTS)
+#   21 = first entry of subsystem 3 (LOCKS)
+# Read-out: K=4 died before qsort; K=5 died in qsort; K=6 died before/during
+# the initialize_upto call (assert?); K=7 died in TUNABLES; K=8 died in
+# TIMEOUTS; K=9 died in LOCKS (or completed). rtclock_early_init() is nearly
+# empty on arm (only PE_register_timebase_callback), so it is not a suspect.
+zzz-g0245d-v129-startup-bootstrap-marks.patch
+# v130: v129 photo -> K=3 again, but v129's band 16 is painted at the ENTRY of
+# kernel_startup_bootstrap(); it stayed dark, so the kernel dies BEFORE entering
+# it. The gap between band 15 (after cpu_bootstrap) and that entry is only:
+#     rtclock_early_init();
+#     kernel_debug_string_early("kernel_startup_bootstrap");
+#     kernel_startup_bootstrap();
+# rtclock_early_init() (osfmk/arm/rtclock.c) is one call to
+# PE_register_timebase_callback(timebase_callback), whose callback PANICS when
+# the timebase constants look invalid - and a panic here has no console, so it
+# looks like a silent hang. DTS does carry timebase-frequency = 19200000, so the
+# constants can still be wrong for another reason.
+# This patch only re-assigns the two low slots:
+#   16 = rtclock_early_init() returned      (arm_init.c)
+#   17 = kernel_debug_string_early() returned, about to enter bootstrap
+# and removes v129's 16/17 marks inside kernel_startup_bootstrap() (18 qsort /
+# 19 initialize_upto entry / 20 TIMEOUTS / 21 LOCKS unchanged).
+# Read-out: K=4 => died INSIDE rtclock_early_init() (timebase callback panic);
+# K=5 => died in kernel_debug_string_early() or at bootstrap entry;
+# K=6 => died inside kernel_startup_bootstrap() before qsort.
+zzz-g0245d-v130-rtclock-marks.patch
+# v131: ROOT CAUSE of the band-16 blackout. v130 placed band 16 right after
+# rtclock_early_init(); it stayed dark -> the kernel dies INSIDE that function.
+# rtclock_early_init() (osfmk/arm/rtclock.c) calls
+# PE_register_timebase_callback(timebase_callback); PE_register_timebase_callback
+# (pexpert/arm/pe_init.c) unconditionally calls PE_call_timebase_callback(), which
+# fills num = gPEClockFrequencyInfo.timebase_frequency_hz, den = 1. timebase_callback
+# then does: if (den < 1 || den > 4 || num < den) panic("rtclock timebase_callback:
+# invalid constant") - and a panic this early has no console, so it looks like a
+# silent hang. gPEClockFrequencyInfo is all zero because pe_identify_machine()
+# bails out at its very first statement:
+#     if (pe_arm_get_soc_base_phys() == 0) return;
+# and pe_arm_get_soc_base_phys() only succeeds when the DT has a node with
+# name="arm-io" - an Apple-ism. This board's DT (hardware.dtb + make-adt.py) has
+# no arm-io, so it returns 0, the defaults (timebase 24 MHz) are never installed,
+# and the callback sees num=0/den=1 -> panic. Removing that early return lets the
+# defaults apply; the /cpus loop finds no "state" property on the cpu nodes and
+# simply leaves 24 MHz in place. v130's bands are kept so we can watch the next
+# milestone light up (16 = rtclock returned).
+zzz-g0245d-v131-no-armio-early-return.patch
+# v132: v131 photo -> K=9, the WHOLE third strip lit. The arm-io early-return fix
+# worked: the kernel now clears rtclock_early_init(), kernel_startup_bootstrap(),
+# qsort() and kernel_startup_initialize_upto(LOCKS) - the old "death near arm_init
+# stage 19" is gone. BUT the probe indices had become ambiguous: v128 left marks
+# 17..21 in arm_init (processor_bootstrap / arm_vm_init / serial_init /
+# PE_create_console / end) while v129 put 18..21 inside startup.c, so "9 lit" could
+# not tell WHICH painter fired. This patch rebuilds a single clean monotonic ladder
+# in arm_init.c and removes every startup.c mark:
+#   13 thread_bootstrap returned      14 cpu_bootstrap returned
+#   15 rtclock_early_init returned    16 kernel_debug_string_early returned
+#   17 kernel_startup_bootstrap returned
+#   18 processor_bootstrap returned   19 arm_vm_init returned (page-table boundary!)
+#   20 serial_init returned           21 arm_init end, just before machine_startup()
+# If 19 is lit but 20 is dark the bootstrap V=P framebuffer mapping survived
+# arm_vm_init(); if 19 is dark the kernel died at the page-table switch.
+zzz-g0245d-v132-arm-init-ladder.patch
+# v133: v132 photo -> K=6 (13..18 lit, 19..21 dark): the kernel stops at
+# arm_vm_init(). Reading osfmk/arm64/arm_vm_init.c explains it:
+#     arm_vm_physmap_init(args);
+#     set_mmu_ttb_alternate(cpu_ttep & TTBR_BADDR_MASK);
+#     set_mmu_ttb(invalid_ttep & TTBR_BADDR_MASK);   /* TTBR0 -> invalid */
+#     flush_mmu_tlb(); kva_active = TRUE;
+#     /* From here on out, we're off the bootstrap translation tables. */
+# Our framebuffer VA 0xC3401000 is a LOW address, i.e. TTBR0 space, valid only in
+# the bootstrap V=P table. So the paint() right after arm_vm_init() writes an
+# unmapped VA and faults - the "hang at arm_vm_init" may be OUR probe killing the
+# kernel, not a real bug. This patch keeps arm_init.c as the only file changed
+# (arm_vm_init.c is already modified by xnu-12377/non-apple-cache-monitor.patch, so
+# a hunk anchored there does not apply) and routes the three post-VM marks through
+# the kernel physmap instead of the dead bootstrap VA:
+#   19 = arm_vm_init() returned      20 = serial_init() returned
+#   21 = arm_init() end
+# using   va = gVirtBase + (0x83401000 - gPhysBase)   (the classic phystokv form).
+# Read-out: 19 lights => arm_vm_init really completed and the kernel runs on the
+# real kernel tables; 19 dark => either it dies there for real, or the physmap does
+# not cover the framebuffer (then we need ml_io_map instead).
+zzz-g0245d-v133-post-vm-physmap-paints.patch
+# v134: v133 (physmap painter) still showed K=6, i.e. band 19 stayed dark. Two
+# possibilities remain and they look identical on screen:
+#   (a) arm_vm_init() really dies, or
+#   (b) the physmap VA (gVirtBase + 0x83401000 - gPhysBase) is not writable and
+#       OUR paint faults.
+# The DT says the framebuffer sits at 0x83401000 inside reserved-memory under a
+# 4 GB /memory@80000000 node, so the physmap *should* cover it - which pushes the
+# balance toward (a). To settle it, put two marks INSIDE arm_vm_init() using the
+# OLD bootstrap-VA painter, which is still valid up to the TTBR switch:
+#     19 = just before arm_set_user_tbi()   (main body done, tables built)
+#     20 = immediately before set_mmu_ttb_alternate()
+# Read-out: 19 dark => died early in arm_vm_init; 19 lit / 20 dark => died between;
+# 19+20 lit => the function reached the switch, so the earlier dark 19 was our
+# physmap paint failing, not arm_vm_init.
+# NOTE: this file is already patched by xnu-12377 patches, so the hunk is generated
+# against a reconstructed tree (device patches applied first), not the raw source.
+zzz-g0245d-v134-arm-vm-init-inner-marks.patch
+# v135: v134 photo still K=6. BOTH probes were inside arm_vm_init() and used the
+# bootstrap-VA painter, which is valid there, so band 19 (just before
+# arm_set_user_tbi()) staying dark means arm_vm_init() really dies somewhere in
+# its body - this is a genuine bug, not a probe artefact.
+# Ruled out: BOOTSTRAP_TABLE_SIZE. native-4k-bootstrap-capacity.patch IS applied
+# (16 pages for native 4K; 4 GB needs 2*(1+ceil(4G/1G))+2 = 12) so the
+# "too small for memory config" panic cannot fire.
+# This patch bisects the function body with one extra early mark, and drops
+# arm_init's 19/20/21 (physmap painter) so the indices cannot collide:
+#     21 = after gPhysSize/mem_size are computed   (first ~20 statements)
+#     19 = just before arm_set_user_tbi()          (late body)
+#     20 = just before set_mmu_ttb_alternate()     (the TTBR switch)
+# Read-out: 21 dark => dies in the first statements; 21 lit/19 dark => dies in the
+# page-table construction in between; 19 lit/20 dark => dies right at the switch.
+zzz-g0245d-v135-arm-vm-init-bisect.patch
+# v136: v135 photo -> K=6 again, and v135's earliest mark (21, six statements into
+# arm_vm_init()) was ALSO dark. That squeezes the death into a tiny window:
+#     processor_bootstrap();      -> band 18 lit
+#     PE_parse_boot_argn("maxmem", ...)
+#     arm_vm_init(xmaxmem, args); -> its first 4 assignments, then band 21
+# so either the maxmem parse kills us, or the kernel never really enters
+# arm_vm_init. This patch moves the mark to the CALL SITE (arm_init.c, immediately
+# before arm_vm_init()) and drops the in-function early one, so the answer is binary:
+#     21 lit  => we reach the call; the death is inside arm_vm_init's first lines
+#     21 dark => we die before the call (maxmem parsing / the call itself)
+# 19 (before arm_set_user_tbi) and 20 (before the TTBR switch) are kept as-is.
+zzz-g0245d-v136-callsite-mark.patch
+# v137: v136 photo -> K=6 again, so band 21 AT THE CALL SITE stayed dark: the
+# kernel dies between processor_bootstrap() (band 18) and arm_vm_init().
+# That window is not just the maxmem parse, it contains:
+#     PE_parse_boot_argn("maxmem", &maxmem, ...) / PE_get_default("hw.memsize", ...)
+#     ... SCHED_HYGIENE_DEBUG block ...
+#     nanoseconds_to_absolutetime(XCALL_ACK_TIMEOUT_NS, ...)
+#     HAS_BP_RET: PE_parse_boot_argn("bpret") + set_bp_ret()
+#     PE_parse_boot_argn("immediate_NMI", ...)
+#     __builtin_arm_wsr("pan", 1)   (PAN)
+# Two real defects found in that window (both fixed here):
+#   1) PE_get_default() has NO /defaults node in this board's ADT (hardware.dtb and
+#      make-adt.py have neither /defaults nor /chosen), so it always falls through to
+#      IODTGetDefault() -> IORegistryEntry::fromPath("/defaults", gIODTPlane): a call
+#      into the IOKit registry from arm_init(), long before IOKit is up.
+#   2) "memsize" is an uninitialised uint32_t local, so if that call ever returned
+#      TRUE the kernel would do xmaxmem = <stack garbage>, and arm_vm_init() CLAMPS
+#      mem_size with it:  if (memory_size != 0 && mem_size > memory_size)
+#                             mem_size = memory_size;
+#      A small garbage value would shrink the whole physmap/bootstrapping geometry.
+# So: drop the PE_get_default branch (default xmaxmem = 0 -> use args->memSize) and
+# initialise memsize. Three marks now bisect the window:
+#     19 = maxmem resolution done
+#     20 = nanoseconds_to_absolutetime() done
+#     21 = at the arm_vm_init() call site
+# arm_vm_init.c's old 19/20 are removed so indices cannot collide.
+# Read-out: 19 dark => dies inside PE_parse_boot_argn; 19 lit/20 dark => dies in the
+# sched-hygiene/bpret/NMI/PAN group or in nanoseconds_to_absolutetime; 20 lit/21 dark
+# => dies in the last few statements; 21 lit => the window is cleared and the earlier
+# dark 19 was PE_get_default itself.
+zzz-g0245d-v137-maxmem-path.patch
+# v138: v137 photo -> K=6, i.e. the window between band 18 (processor_bootstrap)
+# and band 21 (arm_vm_init call site) still kills the kernel. The v137 patch had
+# already removed the two real defects found there (PE_get_default("hw.memsize")
+# without a /defaults node, and the uninitialised memsize local), so what is left
+# in that window is the PAN sequence: arch/configs/common.config sets
+# CONFIG_XNU_NATIVE_PAN=y, native-arm-pan.patch then defines
+# __ARM_PAN_AVAILABLE__=1 in BCM2837.h and arm_init.c executes
+# __builtin_arm_wsr("pan", 1). PAN is ARMv8.1+; MSM8996 Kryo is ARMv8.0, so this
+# is an undefined instruction - a silent freeze with no console. v138 is that
+# config change only (# CONFIG_XNU_NATIVE_PAN is not set in
+# configs/g0245d_defconfig), no patch file needed.
+# Hardware result (2026-11-13): the kernel no longer freezes; the BootShim log is
+# complete, 4 inputs validate, boot services exit - and then the screen goes
+# BLACK. So the PAN root cause is confirmed and XNU runs well past arm_init().
+# v139 hardware result: the stage-24 WHITE BAND was visible at 45% screen
+# height (PE_create_console returned), but the flat blue fill was overwritten
+# by the vc console with a mismatched pixel format - magenta grid texture.
+# A colour fill dies to any console rewrite; an all-0xFF band reads white
+# under every pixel format. So v140 returns to the v137 band geometry
+# (rowbytes 0xCA8) with the band ladder extended to 26..34:
+#   26 PE_init_printf   27 cpu_machine_idle_init  28 PE_init_platform
+#   29 ml_map_cpu_pio   30 cpu_timebase_init      31 kptimer_curcpu_up
+#   32 PE_init_cpu      33 fiq_context_init       34 DT dram-base/size
+#
+# G0245D v141 (hardware 2026-11-14): v140's physmap band repaint (mark_vm ->
+# g0245d_paint_stage_vm) faults the first time it runs, right after arm_vm_init.
+# Photo read-out: bands 13..21 lit, 22..34 all dark, and NO v139-like magenta
+# console -> it died before PE_create_console, i.e. EARLIER than v139. So v141
+# drops v140's mark_vm/mark_va repaint entirely and instead leans on the vc
+# console log. The boot shim reports width=1000 but rowBytes=3240 (a 32bpp line
+# is 810 px), so the console overruns every row and smears into a pattern; v141
+# recomputes v_width = rowBytes/(depth>>3) so the console matches the stride.
+zzz-g0245d-v141-console-width.patch
+
+# G0245D v142 (hardware 2026-11-14): with v141 the screen briefly shows the
+# bootloader + white bands 13..21, then goes BLACK. Black = the console init /
+# clear ran (so arm_vm_init + serial_init + PE_create_console all returned), but
+# no text is emitted -> it dies right after PE_create_console, before/at
+# PE_init_printf (same region as v139's 24<->25 death). To see exactly WHERE it
+# dies after the console, paint the bands through the console's OWN mapped fb VA
+# (vinfo.v_baseaddr - the VA the clear uses, guaranteed mapped), NOT the physmap
+# VA v140 tried (which faulted). g0245d_vc_paint() lives in video_console.c and
+# is called after each post-console step; it repaints 13..index so console clears
+# between steps stay visible. Highest lit band = the last step completed.
+# DROPPED in v143: console text now carries the progress; these white bands
+# would blank out half the text rows and fight the log. Kept on disk for archive.
+# zzz-g0245d-v142-postconsole-vc-bands.patch
+
+# G0245D v143 (hardware 2026-11-14): the root cause of the "bands then black"
+# screens. In arm_init() the boot args carry serial=3 (SERIALMODE_OUTPUT) and
+# serial_init() enumerated a UART, so the kernel calls switch_to_serial_console()
+# BEFORE PE_create_console(). kprintf is then routed to a ttyHSL0 that has no
+# physical connector, and PE_create_console() clears the fb to black - so the
+# screen is black with NO output even though the kernel is still running on the
+# serial path. v143 forces the console back onto the video fb right after
+# PE_create_console() so the boot log prints to the screen and the real death
+# point becomes visible.
+zzz-g0245d-v143-force-video-console.patch
+
+# G0245D v144 (hardware 2026-11-14): the real reason every console write killed
+# the screen. PE_create_console does NOT clear; instead vc_initialize() decides
+# whether to ml_io_map_unmappable() the framebuffer from the boot shim's
+# v_baseAddr. The shim hands us the RAW PHYSICAL address 0x83401000 with bit0
+# clear, so makeMapping stays FALSE and the console uses that physical address
+# as a kernel VA. The first console write (kprintf, or v142's band paint) then
+# faults -> panic -> black. v144 treats any address below the kernel-VA range as
+# physical and forces the mapping. With a valid fb VA and v143 forcing the video
+# console, the boot log should finally print to the screen.
+zzz-g0245d-v144-force-fb-map.patch
+
+# G0245D v145 (hardware 2026-11-14): v144 (forced fb mapping) still showed only
+# "bands then black", so the console-vs-fb theory is not confirmed. Decisive
+# panel test: right before arm_vm_init (bootstrap VA 0xC3401000 still valid per
+# start.s), fill the WHOLE framebuffer solid white (3240*1920 bytes). Reads:
+#   - whole screen stays bright white -> panel/backlight is still ON after
+#     arm_vm_init; the black was fb content / console routing (fixable in sw).
+#   - goes black -> the display/backlight itself is switched off around
+#     arm_vm_init (hardware/clock/DSI), and fb writes can never show: need a
+#     real display init / keep the panel powered, not more fb writes.
+# v145 (fullscreen white) + v146 (white+halt) were DIAGNOSTIC: they proved the
+# display works (v146 showed a pure-white screen). Now that 24bpp is the fix,
+# they are disabled so the console can run on the real boot path.
+# zzz-g0245d-v145-fullscreen-white.patch
+# zzz-g0245d-v146-white-halt.patch
+
+# G0245D v147 (hardware 2026-11-14): THE display fix. v146 (full-white fill +
+# halt) proved the panel/MDP5/fb-write path all work (screen went pure white), so
+# the "black screen" was never hardware: the ft8716 panel is 24bpp RGB888 but the
+# XNU vc console only has 8/16/30/32 paths, so it painted a 32bpp black
+# background over the framebuffer. v147 adds a real 24bpp path to the video
+# console (vc_render_char case 24, vc_paint_char_24 at 3 bytes/pixel, dispatch)
+# and forces v_depth=24 + v_width=rowBytes/3=1080 in pe_init. White-on-black is
+# byte-order agnostic, so the boot log should finally render on the panel.
+zzz-g0245d-v147-console-24bpp.patch
+
+# G0245D v148 (hardware 2026-11-14): v147 also showed "bands flash then black".
+# Root cause of the black: machine_startup calls initialize_screen(NULL,
+# kPEAcquireScreen), which (a) runs vc_progress_set() -> wipes the framebuffer
+# to the progress background and (b) runs gc_enable(FALSE) -> because the
+# console is not serial, that sets disableConsoleOutput = TRUE. Net effect: the
+# panel goes black and NOT ONE character of kernel output is ever painted, so
+# every version since v141 looked dead while the kernel kept running. That is
+# also why v146 (halted before arm_vm_init) stayed white and v145 ("no white")
+# did not: the fill was wiped by the progress screen.
+# Fix: right after kPEAcquireScreen, switch_to_video_console() +
+# initialize_screen(NULL, kPETextScreen) to bring the text console back, and
+# make kernel_bootstrap_log() print unconditionally so the bootstrap trace
+# names every subsystem the kernel enters.
+zzz-g0245d-v148-text-console.patch
+
+# G0245D v149 (hardware 2026-11-14): v148 still showed no text. The text console
+# needs gc_enabled + a rendered font + the right pixel format +
+# disableConsoleOutput == FALSE; any one failing makes a *live* kernel look like
+# a dead black panel, and we cannot tell those apart from a photo. This patch
+# adds a console-independent marker: g0245d_fb_mark(n) writes straight to
+# vinfo.v_baseaddr and memsets the FULL stride (v_rowbytes) to 0xFF, so the band
+# is white regardless of v_depth / v_width / fonts. Bands are cumulative
+# (mark(n) paints 1..n), so the number of white bars = highest mark reached:
+#   1 = entered initialize_screen with a mapped framebuffer (PE_create_console)
+#   2 = entered kernel_bootstrap_thread, before kPEAcquireScreen
+#   3 = survived kPEAcquireScreen + the text-console restore
+#   4 = survived vm_commpage_init / vm_commpage_text_init
+zzz-g0245d-v149-fb-marks.patch
+
+# G0245D v150 (hardware 2026-11-14): the v149 marks did not show on the photo,
+# but the display is vertically flipped (fb row 0 = bottom of the panel) and
+# v149 put them at fb rows 40..244, i.e. the last few percent of the panel, which
+# the photo cropped off. Move them to fb rows 1000..1360 (an area with no
+# pre-existing stripes) and raise the count to 5:
+#   1 = initialize_screen reached with a mapped framebuffer (PE_create_console)
+#   2 = kernel_bootstrap_thread, right before PE_init_iokit
+#   3 = just before kPEAcquireScreen (the call that clears the screen)
+#   4 = survived kPEAcquireScreen + text-console restore
+#   5 = survived vm_commpage_init / vm_commpage_text_init
+zzz-g0245d-v150-marks-visible.patch
+
+# G0245D v151 (hardware 2026-11-16): v150 still black - no white bars at all,
+# while v146 (full-white fill BEFORE arm_vm_init) had shown a pure white screen.
+# Root cause of the missing marks: v149/v150 painted through vinfo.v_baseaddr
+# (the ml_io_map_unmappable VA). That path never showed, but v133's physmap
+# bands (gVirtBase + pa - gPhysBase) DID light after arm_vm_init (bands 13..20),
+# so the console VA is the wrong address to paint with. v151 rewrites
+# g0245d_fb_mark() to paint through the kernel physmap at the physical fb
+# 0x83401000 (24bpp, stride 0xCA8) and re-places the marks so each one is drawn
+# AFTER the call whose success it reports:
+#   1 = PE_init_iokit log (pre-clear; wiped by kPEAcquireScreen)
+#   2 = just before kPEAcquireScreen (pre-clear; wiped)
+#   3 = AFTER initialize_screen(kPEAcquireScreen) - survives the clear
+#   4 = after switch_to_video_console()
+#   5 = after initialize_screen(kPETextScreen)
+#   6 = after vm_commpage_init / vm_commpage_text_init
+# 0 bars => died inside kPEAcquireScreen; 3..6 => progressed that far.
+zzz-g0245d-v151-physmap-marks.patch
+
+# G0245D v152 (hardware 2026-11-16): v151 still black - but the foto is always
+# the loader's "HANDOFF IN 1s" frame, so we have NEVER actually seen the kernel's
+# post-handoff state; it flashes then goes black. Decisive test: right AFTER
+# initialize_screen(kPEAcquireScreen) (the call that wipes the fb + disables the
+# console) paint a BIG solid white block (rows 600..1400) through the physmap and
+# then HARD HALT (mask irq + spin). Nothing later can clear it.
+#   white block visible => the kernel SURVIVED the clear (alive, physmap valid) =>
+#                          the black is a LATER clear/console-off, kernel is running.
+#   still all black    => the kernel dies AT/INSIDE kPEAcquireScreen.
+zzz-g0245d-v152-block-halt.patch
+
+# G0245D v153 (hardware 2026-11-16): v152 (block+halt AFTER kPEAcquireScreen)
+# came back ALL BLACK -> the kernel never reaches the post-acquire code. Move
+# the block+halt to JUST BEFORE initialize_screen(kPEAcquireScreen) (halt before
+# the clear, so nothing wipes the block):
+#   white block => the kernel reaches the acquire call => it dies INSIDE
+#                  initialize_screen(kPEAcquireScreen).
+#   all black   => it dies earlier still (before the acquire call).
+zzz-g0245d-v153-halt-before-acquire.patch
+
+# G0245D v154 (hardware 2026-11-16): v153 (block+halt BEFORE kPEAcquireScreen)
+# also ALL BLACK. Combined with v152, the kernel is dying even before the acquire
+# path - and we have NEVER seen white after arm_vm_init (v146's white was BEFORE
+# it). So CALIBRATE the post-MMU draw: right after arm_vm_init() fill the whole
+# panel white through the physmap and halt.
+#   white => physmap reaches the fb and the kernel got past arm_vm_init.
+#   black => the physmap does NOT reach the fb (cont_splash_mem is a no-map
+#            carveout) or we die at/before arm_vm_init -> the whole physmap-mark
+#            approach (v151..v153) was drawing into unmapped memory.
+zzz-g0245d-v154-postmmu-white.patch
+
+# G0245D v155 (hardware 2026-11-16): ROOT CAUSE of every invisible draw found -
+# cont_splash_mem@0x83401000 is declared `no-map` in dts/g0245d.dts, so it is NOT
+# in the kernel physmap: gVirtBase+pa-gPhysBase points at unmapped memory and
+# every physmap paint (v151 marks, v152/153/154 blocks) FAULTS -> panic -> black/
+# freeze. v154 freezing at the loader frame = that fault firing right after
+# arm_vm_init. So the kernel may have been alive all along. Fix the draw: paint
+# through ml_io_map_unmappable (what the console uses), and (v154 reverted) put
+# the white block + halt back at the kernel_bootstrap_thread point just before
+# kPEAcquireScreen (line ~721) where kernel_map already exists.
+#   white => ml_io_map works AND we reach just before kPEAcquireScreen (alive!).
+#   black => ml_io_map failed for the no-map range OR we die in machine_startup.
+zzz-g0245d-v155-mliomap-fb.patch
+
+# G0245D v156 (hardware 2026-11-16): v155 (ml_io_map) also black. ml_io_map is
+# for MMIO, not DRAM. The splash region is reserved and absent from the bootstrap
+# physmap. FIX: after arm_vm_init()/pmap_bootstrap has run, map the splash
+# physical pages into the physmap VA with pmap_map_bd() (bootstrap mapping), then
+# fill the panel white and halt - at a point we KNOW is reached (arm_vm_init
+# completes). v153's block+halt at kernel_bootstrap is left as dead code.
+#   white => splashing the splash region into physmap works => physmap paints
+#            and the console are finally visible.
+#   black => pmap_map_bd failed or mapped read-only (pmap_force_pte_kernel_ro...).
+zzz-g0245d-v156-map-splash-physmap.patch
+
+# G0245D v157 (hardware 2026-11-16): no serial, no reachable framebuffer - so use
+# PSCI SYSTEM_RESET (x0=0x84000009; smc #0, the exact sequence patch-xnu-entry-
+# probe.py uses) as a display-free reachability probe. Placed right AFTER
+# arm_vm_init(). REBOOT (loader reappears / boot loop) => the kernel completed
+# arm_vm_init and the reset conduit works. Static black/frozen => we never got
+# here (or the reset conduit is dead). This finally disambiguates "kernel dead
+# early" vs "kernel alive, only display is broken", which the screen never could.
+zzz-g0245d-v157-reset-probe-armvminit.patch
+
+# G0245D v158 (hardware 2026-11-16): v157 (reset AFTER arm_vm_init) froze with no
+# reboot. Ambiguous: either arm_vm_init never completes, OR the PSCI reset conduit
+# is dead here. Calibrate it at a point we KNOW is reached - the arm_vm_init CALL
+# SITE (band 21 lights right before it). If THIS reboots, resets work and v157's
+# freeze means arm_vm_init itself hangs; if this ALSO freezes, the PSCI SMC reset
+# is dead on this board and we must find another reachability signal (HVC / PMIC /
+# watchdog).
+zzz-g0245d-v158-reset-before-armvminit.patch
+# v159: multi-conduit hard reset probe at arm_init entry (band 7, always reached)
+zzz-g0245d-v159-reset-multiconduit.patch
+# v160: drop both reset/loop probes; three 16-row probes (identity before arm_vm_init,
+# identity after, physmap after) to find which mapping still reaches the panel
+zzz-g0245d-v160-three-way-map.patch
+# v161: flood rows 200-680 white before arm_vm_init, black after -> does the loader
+# V=P window survive the TTBR0 swap? (stays strictly inside band-proven rows)
+zzz-g0245d-v161-flood-erase.patch
+# v162: v161 proved the loader window dies in arm_vm_init. pmap_map_bd the splash
+# range onto the physmap VA, paint through THAT VA, then flush dcache (Normal cacheable)
+zzz-g0245d-v162-physmap-rebuild.patch
+# v163: (1) remove the leftover v153 fb_block+halt in machine_startup - it blocked every
+# build since v153; (2) drop the no-op pmap_map_bd; (3) fb_mark now uses ml_io_map_wcomb
+zzz-g0245d-v163-wcomb-marks.patch
+# v164: pmap_* forwards to sptm_map_page with __assert_only return -> silent no-op on this
+# board. Borrow the loader TTBR0 back for one paint (the only photo-proven mapping)
+zzz-g0245d-v164-ttbr0-borrow.patch
+# v165: v164 proved the loader table can paint. fb_mark() now borrows TTBR0 for every
+# paint (one swap per mark), so kernel progress becomes visible from machine_startup on
+zzz-g0245d-v165-borrowed-paint.patch
+# v166: skip initialize_screen(kPEAcquireScreen) - vc_progress_set wipes the whole fb and
+# gc_enable(FALSE) kills console output; that is what erases our blocks and blacks the panel
+zzz-g0245d-v166-skip-acquire-clear.patch
+# v167: v166 skipped the acquire clear and it still went black -> also skip
+# switch_to_video_console + initialize_screen(kPETextScreen). Still black => the DISPLAY is
+# switched off later (MDP5/DSI clocks/power), not the framebuffer being wiped
+zzz-g0245d-v167-skip-text-console.patch
+# v168: startup.c is innocent (v166/v167). Replay Mu-Silicium MmssPowerAndClocks() to
+# bring MMSS GDSCs + MDP/AXI/VSYNC clocks back up -> if MDP5 kept its registers the panel resumes
+zzz-g0245d-v168-mmss-recover.patch
+# v169: paint rows 700..972 after arm_vm_init (v164 recipe, no halt) and halt right after
+# the MMSS replay -> a photo now says whether the replay revived MDP5 or the GDSCs collapsed
+zzz-g0245d-v169-paint-then-halt.patch
+# v170: can ml_io_map (VM_WIMG_IO, non-cacheable) map DRAM and reach the panel? If a white
+# band appears at rows 1000..1160 we finally have a kernel-side painter that needs no TTBR0 borrow
+zzz-g0245d-v170-mliomap-paint.patch
+# v171: re-run the Mu-Silicium GDSC/clock sequence in a ~10s loop before halting, to tell
+# 'power rails die' apart from 'DSI link/panel sleeps' (the last open question)
+zzz-g0245d-v171-mmss-keeper.patch
+# v172: install a permanent device-attribute framebuffer mapping into the TTBR1 tables during
+# arm_vm_init (technique from the G0345D port). Replaces TTBR0 borrowing; all painters use g0245d_fb_va
+zzz-g0245d-v172-ttbr1-fb-slot.patch
+
+# v173: v172's row 700..972 solid block buried the six startup.c fb_mark bars;
+# drop it so the bar count reveals how far machine_startup got.
+zzz-g0245d-v173-reveal-marks.patch
+
+# v174: binary split - draw mark(6) at the END of arm_init (fb slot proven good
+# there in v172) to tell 'slot dies in arm_init' from 'fault after machine_startup'.
+zzz-g0245d-v174-arm-end-mark.patch
+
+# v175: 5 staged marks across arm_init after arm_vm_init (1..5) plus the
+# existing mark(6) at the tail; the highest bar count on screen pins which
+# call (PE_create_console / PE_init_printf / PE_init_platform) kills the slot.
+zzz-g0245d-v175-stage-marks.patch
+
+# v176: ROOT CAUSE - v172's TTBR1 fb slot never installed (fb_va stuck at 0
+# because arm_vm_init maps over the slot VA). Restore the only photo-proven
+# painter: borrow loader TTBR0, paint bands via 0xC3401000, restore.
+zzz-g0245d-v176-borrow-painter.patch
+
+# v177: GEOMETRY BASELINE - draw the 6 mark bars BEFORE arm_vm_init via
+# the proven loader VA 0xC3401000 (no borrow). Six bars => brush+geometry
+# correct, fault is after arm_vm_init; none => our row calibration is wrong.
+zzz-g0245d-v177-geometry-baseline.patch
+
+# v178: A/B vs v177 - after arm_vm_init, paint the same 6 bars BLACK via
+# the same loader VA with plain stores. Black => VA+kernel survive; white
+# => VA dies across arm_vm_init / kernel aborts here; need permanent map.
+zzz-g0245d-v178-ab-after-vm.patch
+zzz-g0245d-v179-ml-io-map.patch
+
+# v180 (SUPERSEDED by v181, kept for history): framebuffer TEXT console -
+# register the boot fb as a pe_serial_functions and route kprintf into 8x16
+# glyphs in the LOWER panel, leaving the stock video console alone.
+#
+# v180 was flashed (md5 f3d74ac6b47d2e1d655ffdfedea1234b) and the panel then
+# showed the loader trace, whose video line is the decisive datum:
+#   DARWINBOOT: video base=0x83401000 display=1 row=3240 width=1080 height=1920 depth=24
+# depth=24 means 3 bytes per pixel (stride 3240 == 1080*3, no padding), but
+# v180 stored uint32_t. A 32bpp store into a 24bpp aperture writes the byte
+# pattern 00 00 00 ff repeatedly, which renders as black/blue/green/red
+# vertical stripes - never legible glyphs. v181 fixes exactly this and is a
+# full replacement for v180, so only v181 is listed below.
+
+# v181 (SUPERSEDED by v182): fixed the 24bpp store bug but still fetched the
+# framebuffer with ml_io_map(). v181 was never flashed - the v180 panel photo
+# already showed that no black block appeared at all, and g0245d_fbcon_init()
+# blanks with zero bytes, which look identical at 24 and 32 bpp. So the base
+# pointer was NULL: ml_io_map() does not work from serial_init.
+
+# v182 (SUPERSEDED by v183): wrote through the loader identity VA 0xC3401000.
+# That mapping is installed by the loader, but start.s rebuilds TTBR0/TTBR1 in
+# common_start() via create_bootstrap_mapping(), so the loader VA is gone long
+# before any kernel C code runs. Writing it faults. The "six white bars" that
+# v177 seemed to prove were in fact boot-menu UI chrome, not kernel output.
+
+# v183: framebuffer TEXT console with all four root causes fixed at once.
+#   1. mapping : ml_io_map() -> Device-nGnRnE. v152 painted through the physmap
+#      (Normal cacheable), so the stores never reached DRAM and the scanout
+#      engine, reading by DMA, kept showing stale pixels.
+#   2. timing  : called from arm_init() right before PE_init_printf(), which is
+#      after arm_vm_init() at arm_init.c:522, so the pmap exists and
+#      ml_io_map() does not return NULL (that was v180/v181).
+#   3. row order: SimpleFbDxe runs mFbFlip = TRUE (panel scans bottom-up), so
+#      every row index is flipped: y_fb = 1919 - y_screen.
+#   4. depth   : 24bpp, bytes (G, R, B), per the DARWINBOOT trace and the
+#      loader's PaintBand comment.
+# It also bypasses vinfo.v_baseaddr, which stays 0 because vc_initialize()'s
+# ml_io_map_unmappable() fails, and that 0 is why every v149 mark returned
+# silently.
+zzz-g0245d-v183-fbcon-device-map.patch
+
+# v184: the authoritative liveness probe, and the reason v180-v183 could never
+# have worked. osfmk/arm/io_map.c:105 has two early paths and arm_init() sits
+# between them: before STARTUP_SUB_KMEM it slices virtual_space_start and calls
+# pmap_map_bd(), and after it, kmem_alloc(io_submap, ...) -- but io_submap only
+# exists once STARTUP(KMEM, STARTUP_RANK_LAST, io_map_init) has run. So
+# ml_io_map() cannot succeed from arm_init(); it either returns 0 or trips over
+# a NULL submap. v183 therefore did nothing visible.
+#
+# v184 goes through the physmap instead, which arm_vm_init() has definitely
+# built: va = gVirtBase + (pa - gPhysBase). That mapping is Normal cacheable,
+# which is exactly why v152's block never showed -- the stores sat in cache
+# while the scanout engine read DRAM. v184 cleans every touched line to the
+# point of coherency with `dc civac` plus a `dsb sy`.
+#
+# It paints a solid black band over screen rows 1250..1450 (flipped, because
+# SimpleFbDxe is mFbFlip = TRUE) and runs immediately after arm_vm_init(),
+# before PE_create_console(). A black band on the light grey lower panel means
+# the kernel definitely survived arm_vm_init(), which nothing so far has
+# actually proven.
+zzz-g0245d-v184-physmap-flush-probe.patch
+
+# v185: black the entire framebuffer. v184's 200-row band through the physmap
+# produced nothing, leaving two possibilities that a band cannot separate:
+# either the kernel never reaches arm_init()'s post-arm_vm_init code, or the
+# physmap address arithmetic is wrong. A wholly black panel settles it -- there
+# is no loader UI or boot-menu chrome that looks black by accident.
+#
+# Also corrects a size error that has been in every probe so far: the full
+# panel is 1080 * 1920 * 3 = 6220800 bytes (0x5EE600), not 0x200000. 2MiB only
+# covers roughly 640 of the 1920 rows.
+zzz-g0245d-v185-fb-blackout.patch
+
+# v188: make the framebuffer console actually draw. Two defects in v183/v185 are
+# fixed, both read straight out of the tree:
+#
+# 1) ml_io_map() cannot fail and cannot be checked. osfmk/arm/io_map.c has a
+#    single return, "return start + start_offset" - the pre-KMEM branch takes
+#    virtual_space_start, the late branch calls kmem_alloc(KMA_NOFAIL). So
+#    "if (fb_va != 0)" / "if (base == NULL)" are dead guards, while the
+#    descriptor it asks for is installed by pmap_map() -> sptm_map_page(),
+#    whose result is only checked under __assert_only on this port. The mapping
+#    can be absent and the first store then takes a translation fault: an
+#    invisible death, because kprintf still has no console.
+#    v188 drops ml_io_map() for the console path. It claims a probed-EMPTY 1 GB
+#    slot above the TTBR1 base, points it at PA 0x80000000 as a single Device
+#    block (CACHE_ATTRINDX_DISABLE - the physmap is Normal cacheable, which is
+#    why v152/v184/v185 wrote DRAM that MDP5's DMA never observed) and derives
+#    the framebuffer VA from the same base, so "installed VA" and "written VA"
+#    cannot drift apart. Slot numbers come from T1SZ_BOOT and the ARM_TT_*
+#    masks, never from a hardcoded address - VM_MIN_KERNEL_ADDRESS moves when
+#    the pexpert config selects the CTRR/KTRR layout.
+#
+# 2) Registering a pe_serial_functions does not route kprintf to it.
+#    switch_to_serial_console() only switches when serial_console_enabled is
+#    set, and arm_init() leaves that FALSE because serial_init() enumerated no
+#    UART on this board. v188 sets the flag, clears disableConsoleOutput and
+#    switches the console over, so the log actually reaches fbcon.
+#
+# The text also moves from screen y 40 to screen y 960: with the bottom-up
+# panel that lands in fb rows 384..959, the only band ever proven visible here
+# (v177/v178 calibration said fb rows 8..972). v183's row 40 sat at fb rows
+# 1303..1895, outside the calibrated area.
+# zzz-g0245d-v188-fbcon-ttbr1-alias.patch
+# ^ PARKED. Reverted out of the tree and moved to workspace/tmp/parked/.
+#   It re-enables the framebuffer console on a probed-empty 1 GB TTBR1 slot -
+#   a separate experiment that must not ride along with v187, which is a pure
+#   confounder removal.
+#
+# v187: remove the three unconditional things that made every boot since v183
+# look dead. All three execute with no guard at all:
+#   1. osfmk/arm/arm_init.c g0245d_fb_blackout()  - floods all 6,220,800 bytes
+#      of the scanout buffer with black and cleans them to PoC, erasing the
+#      BOOT_MARK strips, PAINT 8..12, paint_stage(13..21) and the six white
+#      bars painted before it.
+#   2. osfmk/arm/arm_init.c g0245d_fbcon_start() - calls ml_io_map() in the
+#      arm_init() window, where io_submap does not exist yet, then writes
+#      "V183 FBCON OK" through whatever it got. It sits between fb_mark(2) and
+#      fb_mark(3), so a fault there masks the one signal we need.
+#   3. osfmk/kern/startup.c - 2000 x (g0245d_mmss_recover() + a 2,000,000
+#      iteration spin) and then g0245d_halt(), i.e. "msr daifset,#0xf; b .".
+#      This was the real end of every boot since v168: the kernel painted, then
+#      stopped itself. Nothing past machine_startup ever ran.
+# start.s is deliberately untouched: the loader screenshot prints
+# "ENTRY PA 0x95419488", so the kernel is loaded at PA 0x95004000 and
+# 0x95004000 >> 30 == 2 - the kernel's own L2 descriptor is at L1 index 2.
+# The v122 choice of L1 index 3 for the panel window is correct on this board.
+zzz-g0245d-v187-drop-confounders.patch
+
+# v188: move the framebuffer text console call from arm_init() (where
+# io_submap does not exist yet, so ml_io_map() hands out an unvalidated
+# mapping - an invisible death between fb_mark(2) and fb_mark(3)) to
+# startup.c, right after kernel_startup_initialize_upto(STARTUP_SUB_LOCKDOWN),
+# which is where STARTUP(KMEM, STARTUP_RANK_LAST, io_map_init) runs. The call
+# doubles as a probe: text on the panel means the lockdown init returned.
+# Also enables the serial_console_enabled gate + switch_to_serial_console() so
+# every later kprintf()/printf() lands on the panel, and moves FBCON_ROW0 from
+# 40 (fb rows 1303..1895, outside the proven-visible 8..972 range) to 960
+# (fb rows 384..959, inside it).
+zzz-g0245d-v188-fbcon-lockdown-text.patch
+
+# v189: fix the fbcon ROW0 coordinate bug. v188 wrote
+# (ROW0 + row) * 16 * SCALE, multiplying the 960 screen-row base by 32 as
+# well: y0 = 30720 for row 0, every y_screen lands past 1919, and
+# g0245d_fbcon_px()'s y_fb = 1919 - y_screen wraps as uint32_t so the
+# >= height guard silently discarded EVERY pixel - not even the
+# "V183 FBCON OK" proof-of-life reached the panel. The v188 photo indeed
+# shows only the v187-era paint_stage/fb_mark bands, no text at all.
+# Old ROW0 40 worked by accident: (40 + row) * 32 = 1280..1855 is a valid
+# screen range, so the historical "no text" failures were the call site
+# (ml_io_map before io_map_init), never this constant. Formula is now
+# ROW0 + row * 16 * SCALE: row 0 -> screen 960..991 -> fb 928..959,
+# row 17 -> fb 384..415, all inside the proven-visible fb 8..972.
+zzz-g0245d-v189-fbcon-row0-fix.patch
+
+# v190: fix the fbcon ml_io_map length. G0245D_FB_SIZE was 0x200000 (2 MiB),
+# which covers only fb rows 0..642, but fbcon row 0 lives at fb 928..959
+# (byte offset 3,006,720). fbcon_init() blanks row 0 FIRST, so the very
+# first pixel store was a data abort on unmapped device memory - before
+# switch_to_serial_console(), with no console alive: a perfectly silent
+# death. That is exactly what the v189 photo shows (frozen pre-fault frame,
+# zero fbcon pixels). The loader handoff line reports the reserved display
+# region as 0x23ff000; map that much so every fbcon row is inside the map.
+zzz-g0245d-v190-fbsize.patch
+
+# v191: fbcon ditches ml_io_map and borrows the loader page table like
+# fb_mark does. The v176 fb_mark history comment already recorded what photos
+# proved: ml_io_map / pmap_map_bd silently fail on this board (no SPTM -
+# sptm_map_page()'s result is only checked by __assert_only), and the physmap
+# is Normal cacheable so its stores never reach DRAM. pmap_map() leaves the
+# PTE unwritten, so the first fbcon_init() store took a data abort: the
+# perfectly silent death frozen into the v189/v190 photos. The ONE painter
+# with photo proof is the TTBR0 borrow through the loader identity window
+# 0xC3401000 (VA -> PA 0x83401000). fbcon now: fbcon_start checks
+# g0245d_ttbr0_loader (no ml_io_map at all), fbcon_px writes straight into
+# the identity window, and every fb-touching entry point (init, putc) wraps
+# its work in one TTBR0 push/pop with the same full TLBI fb_mark has proven
+# safe in photos since v176. Proof-of-life strings updated to V191.
+zzz-g0245d-v191-fbcon-ttbr0.patch

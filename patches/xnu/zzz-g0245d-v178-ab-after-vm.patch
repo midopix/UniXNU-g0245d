@@ -1,0 +1,36 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -707,6 +707,32 @@
+ 	arm_vm_init(xmaxmem, args);
+ 
+ 	/*
++	 * G0245D v178: A/B vs v177. v177 painted six WHITE bars through the
++	 * loader VA 0xC3401000 BEFORE arm_vm_init and all six showed up. Here,
++	 * IMMEDIATELY after arm_vm_init, use the SAME VA and the SAME plain
++	 * stores to paint those six rows BLACK. The only changed variable is
++	 * whether arm_vm_init broke the loader identity mapping / killed the
++	 * kernel.
++	 *   bars turn BLACK -> VA survives arm_vm_init and kernel is alive;
++	 *                      earlier mark failures were the helper/call-site.
++	 *   bars stay WHITE -> the VA dies across arm_vm_init (or kernel aborts
++	 *                      here): must build a permanent deviceAttr mapping.
++	 */
++	{
++		volatile unsigned int *fb;
++		int i;
++		unsigned long k;
++
++		for (i = 0; i < 6; i++) {
++			fb = (volatile unsigned int *)(unsigned long)
++			    (0xC3401000UL + (unsigned long)(700 + i * 45) * 0xCA8UL);
++			for (k = 0; k < (30UL * 0xCA8UL / 4UL); k++) {
++				fb[k] = 0x00000000U;
++			}
++		}
++	}
++
++	/*
+ 	 * G0245D v173: v172's permanent TTBR1 framebuffer slot is proven working -
+ 	 * its row 700..972 solid block lit up on the panel. Drop that block now so
+ 	 * the six g0245d_fb_mark() bars in startup.c (rows 700+45*i, 30 rows tall)

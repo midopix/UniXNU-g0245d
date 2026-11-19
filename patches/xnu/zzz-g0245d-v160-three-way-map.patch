@@ -1,0 +1,156 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -392,58 +392,13 @@
+ 	g0245d_paint_stage(7);
+ 
+ 	/*
+-	 * G0245D v159: multi-conduit hard-reset probe at a point that is 100%
+-	 * reached (band 7 has been lit since v122; v137 K=8 lit bands 0..20).
+-	 *
+-	 * v157 put a PSCI SMC reset after arm_vm_init and the panel merely froze,
+-	 * v158 put it just before arm_vm_init and it froze again - so we cannot
+-	 * tell "the reset conduit is dead" from "we never got there". This block
+-	 * removes the ambiguity by trying every conduit we have, and then falling
+-	 * back to the one thing we know can reach the panel from here: the loader
+-	 * V=P window at 0xC3401000 (phys 0x83401000 + 0x40000000), proven by v146.
+-	 *
+-	 *   reboot                    -> a conduit works, and we have our bisection
+-	 *                                signal back (no screen, no serial needed)
+-	 *   white panel, then reboot  -> the APCS watchdog fired (bite time 1)
+-	 *   white panel, never reboot -> every conduit is dead; stop chasing
+-	 *                                resets and go back to fixing the mapping
++	 * G0245D v159 result: the panel went black here even though paint_stage(7)
++	 * uses the very same VA (0xC3401000, see start.s). Cause: the fallback
++	 * loop below painted all 1920 rows = 6.2 MB, far past what the loader V=P
++	 * table covers, so it took a data abort part way through. v160 drops that
++	 * block entirely - the multi-conduit reset conclusion (all three dead)
++	 * still stands, and we no longer need it.
+ 	 */
+-	{
+-		volatile unsigned int  *wdt   = (volatile unsigned int  *)(unsigned long)0x41780000UL;
+-		volatile unsigned int  *tcsr1 = (volatile unsigned int  *)(unsigned long)0x41930000UL;
+-		volatile unsigned int  *tcsr2 = (volatile unsigned int  *)(unsigned long)0x404AB000UL;
+-		volatile unsigned char *fb    = (volatile unsigned char *)(unsigned long)0xC3401000UL;
+-		unsigned long i;
+-
+-		/* 1. PSCI SYSTEM_RESET (0x84000009) through the SMC conduit. */
+-		__asm__ __volatile__(
+-			"movz w0, #0x0009\n\t"
+-			"movk w0, #0x8400, lsl #16\n\t"
+-			"mov x1, xzr\n\t"
+-			"mov x2, xzr\n\t"
+-			"mov x3, xzr\n\t"
+-			"smc #0\n"
+-			::: "x0", "x1", "x2", "x3", "memory");
+-
+-		/* 2. PS_HOLD candidates: writing 0 drops the PMIC hold line. */
+-		*tcsr1 = 0;
+-		*tcsr2 = 0;
+-
+-		/* 3. APCS watchdog (kryo): shortest bark/bite, enable, never feed. */
+-		wdt[0x08 / 4] = 0;
+-		wdt[0x20 / 4] = 1;
+-		wdt[0x24 / 4] = 1;
+-		wdt[0x08 / 4] = 1;
+-
+-		/* 4. Fallback arrival signal: whole panel white via the loader window. */
+-		for (i = 0; i < (0xCA8UL * 1920UL); i++) {
+-			fb[i] = 0xFF;
+-		}
+-
+-		for (;;) {
+-			__asm__ __volatile__("wfe");
+-		}
+-	}
+ 
+ 	arm_setup_pre_sign();
+ 
+@@ -664,22 +619,74 @@
+ 
+ 	g0245d_paint_stage(21);   /* v136: at the arm_vm_init() call site */
+ 
+-	/* G0245D v158: calibrate the reset conduit at a point we KNOW is reached
+-	 * (the arm_vm_init call site, where band 21 lights). REBOOT => the PSCI
+-	 * reset works and we can bisect kernel progress; frozen => the PSCI reset
+-	 * conduit is dead on this board and we need another reachability signal. */
+-	__asm__ __volatile__(
+-		"movz w0, #0x0009\n\t"
+-		"movk w0, #0x8400, lsl #16\n\t"
+-		"mov x1, xzr\n\t"
+-		"mov x2, xzr\n\t"
+-		"mov x3, xzr\n\t"
+-		"smc #0\n"
+-		"1:\twfe\n\tb 1b\n"
+-		::: "x0", "x1", "x2", "x3", "memory");
++	/*
++	 * G0245D v160: three-way mapping probe.
++	 *
++	 * The loader V=P window (0xC3401000, phys 0x83401000 + 0x40000000) is the
++	 * ONLY mapping ever proven to reach this panel - g0245d_paint_stage uses
++	 * exactly it, and bands light from it. arm_vm_init() rewrites TTBR0, so
++	 * everything hinges on one question: does that window still work after
++	 * the swap? Nothing we tried afterwards (physmap, ml_io_map, pmap_map_bd)
++	 * ever lit a pixel, but each of those attempts also painted huge ranges
++	 * (up to 6.2 MB) that may simply have run off the end of the mapping.
++	 *
++	 * So: three 16-row (51 KB) probes, each through a different mapping, at
++	 * rows clear of every existing band (bands live in rows 200-648 and
++	 * 700-956; the panel is vertically flipped, so rows 1000-1100 land in the
++	 * middle of the visible screen):
++	 *
++	 *   A  row 1000  identity VA   BEFORE arm_vm_init  - control
++	 *   B  row 1040  identity VA   AFTER  arm_vm_init  - does TTBR0 keep it?
++	 *   C  row 1080  physmap VA    AFTER  arm_vm_init  - is physmap usable?
++	 *
++	 * Photo readings:
++	 *   1 bar (A only)      -> the identity window dies in arm_vm_init, and
++	 *                          the abort stops us before B; we must build a
++	 *                          fresh mapping after the swap.
++	 *   2 bars (A + B)      -> the identity window SURVIVES the swap; physmap
++	 *                          is the broken path. Use 0xC3401000 everywhere.
++	 *   3 bars (A + B + C)  -> both work; earlier failures were the huge
++	 *                          writes, not the mapping.
++	 *   0 bars              -> my C-level writes differ from the asm in
++	 *                          start.s; fix the probe itself.
++	 */
++	{
++		volatile unsigned int *fb;
++		unsigned long n;
++
++		fb = (volatile unsigned int *)(unsigned long)(0xC3401000UL + 1000UL * 0xCA8UL);
++		for (n = 0; n < (16UL * 0xCA8UL / 4UL); n++) {
++			fb[n] = 0xFFFFFFFFU;
++		}
++	}
+ 
+ 	arm_vm_init(xmaxmem, args);
+ 
++	{
++		extern unsigned long gVirtBase;
++		extern unsigned long gPhysBase;
++		volatile unsigned int *fb;
++		volatile unsigned int *pm;
++		unsigned long n;
++
++		/* B: the same loader window, now after the TTBR0 swap. */
++		fb = (volatile unsigned int *)(unsigned long)(0xC3401000UL + 1040UL * 0xCA8UL);
++		for (n = 0; n < (16UL * 0xCA8UL / 4UL); n++) {
++			fb[n] = 0xFFFFFFFFU;
++		}
++
++		/* C: the kernel physmap window. */
++		pm = (volatile unsigned int *)(unsigned long)
++		    (gVirtBase + (0x83401000UL - gPhysBase) + 1080UL * 0xCA8UL);
++		for (n = 0; n < (16UL * 0xCA8UL / 4UL); n++) {
++			pm[n] = 0xFFFFFFFFU;
++		}
++
++		for (;;) {
++			__asm__ __volatile__("wfe");
++		}
++	}
++
+ 	if (debug_boot_arg) {
+ 		patch_low_glo();
+ 	}
